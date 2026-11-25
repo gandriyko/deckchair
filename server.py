@@ -43,6 +43,9 @@ CLIPBOARD_SYNC_SECONDS = 1.0
 # Vision OCR on this Mac has no Hebrew: Hebrew labels are not read, digits next to them are
 OCR_LANGUAGES = ["en-US", "uk-UA", "ru-RU"]
 OCR_MAX_ASPECT = 8
+OCR_TILE = 400
+OCR_TILE_OVERLAP = 40
+OCR_MIN_NATIVE_SCALE = 4
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 LOG_DIR = Path.home() / ".deckchair"
 held_lock = []
@@ -374,11 +377,66 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
     _acquire_lock()
     image, scale = _capture_native()
     screen_width, screen_height = _screen_size()
-    origin_x, origin_y, width, height = 0, 0, screen_width, screen_height
-    wanted = region
-    if region:
-        origin_x, origin_y, width, height = _ocr_region(region, screen_width, screen_height)
-        image = _crop(image, scale, [origin_x, origin_y, width, height])
+    wanted = region or [0, 0, screen_width, screen_height]
+    needle = text.lower() if text else None
+    upscale = max(1.0, OCR_MIN_NATIVE_SCALE / scale)
+    results = []
+    for tile in _ocr_tiles(wanted):
+        tile = _ocr_region(tile, screen_width, screen_height)
+        results += _ocr_tile(_upscale(_crop(image, scale, tile), upscale), tile, needle)
+    found = []
+    # longest lines first: a line cut at a tile edge is dropped in favour of the whole line from the next tile
+    for line_box, line, point_box in sorted(results, key=lambda result: -len(result[1])):
+        centre = _centre(line_box)
+        if not _inside(centre, wanted) or any(_inside(centre, kept[0]) for kept in found):
+            continue
+        found.append((line_box, line, point_box))
+    if not found:
+        return f"No text matching {text!r} on screen." if text else "No text on screen."
+    found.sort(key=lambda result: (result[0][1], result[0][0]))
+    return "\n".join(f"{line!r} at {_centre(point_box)} box {point_box}" for line_box, line, point_box in found)
+
+
+def _centre(box: list[int]) -> tuple[int, int]:
+    return box[0] + box[2] // 2, box[1] + box[3] // 2
+
+
+def _inside(point: tuple[int, int], box: list[int], margin: int = 2) -> bool:
+    return box[0] - margin <= point[0] <= box[0] + box[2] + margin and box[1] - margin <= point[1] <= box[1] + box[3] + margin
+
+
+def _ocr_tiles(region: list[int]):
+    """Vision shrinks a large image and loses small text (a full 1568x882 screen: 9 lines; its lower half alone:
+    70), so OCR runs on ~OCR_TILE tiles that overlap by OCR_TILE_OVERLAP."""
+    x, y, width, height = region
+    columns, rows = max(1, math.ceil(width / OCR_TILE)), max(1, math.ceil(height / OCR_TILE))
+    tile_width, tile_height = math.ceil(width / columns), math.ceil(height / rows)
+    for row in range(rows):
+        for column in range(columns):
+            left = max(x, x + column * tile_width - OCR_TILE_OVERLAP)
+            top = max(y, y + row * tile_height - OCR_TILE_OVERLAP)
+            right = min(x + width, x + (column + 1) * tile_width + OCR_TILE_OVERLAP)
+            bottom = min(y + height, y + (row + 1) * tile_height + OCR_TILE_OVERLAP)
+            yield [left, top, right - left, bottom - top]
+
+
+def _upscale(image, factor: float):
+    # Vision misses text only ~15 native pixels high (a Dock tooltip in a 300x82 region); twice the size it reads it
+    if factor <= 1:
+        return image
+    width = int(Quartz.CGImageGetWidth(image) * factor)
+    height = int(Quartz.CGImageGetHeight(image) * factor)
+    context = Quartz.CGBitmapContextCreate(
+        None, width, height, 8, 0, Quartz.CGColorSpaceCreateDeviceRGB(), Quartz.kCGImageAlphaNoneSkipLast
+    )
+    Quartz.CGContextSetInterpolationQuality(context, Quartz.kCGInterpolationHigh)
+    Quartz.CGContextDrawImage(context, Quartz.CGRectMake(0, 0, width, height), image)
+    return Quartz.CGBitmapContextCreateImage(context)
+
+
+def _ocr_tile(image, tile: list[int], needle: str | None) -> list[tuple[list[int], str, list[int]]]:
+    """(line box, line, click box) in screenshot pixels for the text lines of one tile; with a needle, only lines
+    containing it, and the click box is the match itself."""
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     request.setUsesLanguageCorrection_(False)
@@ -387,33 +445,31 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
     success, error = handler.performRequests_error_([request], None)
     if not success:
         raise RuntimeError(f"OCR failed: {error}")
-    needle = text.lower() if text else None
-    found = []
+    tile_x, tile_y, tile_width, tile_height = tile
+
+    def to_pixels(box) -> list[int]:
+        # Vision boxes are normalised with the origin at the bottom left
+        return [
+            round(tile_x + box.origin.x * tile_width),
+            round(tile_y + (1 - box.origin.y - box.size.height) * tile_height),
+            round(box.size.width * tile_width),
+            round(box.size.height * tile_height),
+        ]
+
+    lines = []
     for observation in request.results() or []:
         candidate = observation.topCandidates_(1)[0]
         line = candidate.string()
-        box = observation.boundingBox()
+        line_box = point_box = to_pixels(observation.boundingBox())
         if needle:
             start = line.lower().find(needle)
             if start < 0:
                 continue
             match, error = candidate.boundingBoxForRange_error_(Foundation.NSMakeRange(start, len(needle)), None)
             if match is not None:
-                box = match.boundingBox()
-        # Vision boxes are normalised with the origin at the bottom left
-        box_x = round(origin_x + box.origin.x * width)
-        box_y = round(origin_y + (1 - box.origin.y - box.size.height) * height)
-        box_width, box_height = round(box.size.width * width), round(box.size.height * height)
-        centre_x, centre_y = box_x + box_width // 2, box_y + box_height // 2
-        if wanted and not (
-            wanted[0] <= centre_x <= wanted[0] + wanted[2] and wanted[1] <= centre_y <= wanted[1] + wanted[3]
-        ):
-            continue
-        found.append((box_y, box_x, f"{line!r} at ({box_x + box_width // 2}, {box_y + box_height // 2}) "
-                                    f"box [{box_x}, {box_y}, {box_width}, {box_height}]"))
-    if not found:
-        return f"No text matching {text!r} on screen." if text else "No text on screen."
-    return "\n".join(entry for box_y, box_x, entry in sorted(found))
+                point_box = to_pixels(match.boundingBox())
+        lines.append((line_box, line, point_box))
+    return lines
 
 
 @mcp.tool()

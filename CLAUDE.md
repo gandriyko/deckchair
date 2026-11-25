@@ -50,8 +50,12 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   back: `_post_mouse` multiplies and adds the selected display's origin (negative x left of the main),
   `_mouse_position` reverses it, `_capture_native` returns native pixels per screenshot pixel for crops.
   `CGWarpMouseCursorPosition` and `_mouse_global` stay in global points.
-- **OCR of thin regions.** Vision finds nothing in a long thin image (1568x40 menu bar: no text; 784x40:
-  fine). `_ocr_region` grows the short side to 1/8 of the long one; results outside the request are dropped.
+- **OCR needs small tiles of large text.** Vision shrinks a big image and loses small text: on a
+  3840x2160 pt display the full screen gave 9 lines, its lower half 70. `find_text` runs on ~400 px tiles
+  (40 px overlap), each upscaled to at least 4 native pixels per screenshot pixel (a 6 px Dock tooltip was
+  found only upscaled), and grown to 1:8 if thin (a 1568x40 strip gave nothing). Longest lines win over
+  tile-edge fragments; lines centred outside the request are dropped. Full screen: 360 lines in ~1.8 s.
+  `minimumTextHeight` is already 0 by default; changing it doesn't help.
 - **Displays.** `_displays()` puts the main display first; `screencapture -D` numbers them the same way
   (checked with a 5K main display and the built-in one). The fail-safe checks the corners of every display.
 - **Scroll in RDP.** One `kCGScrollEventUnitLine` event per wheel tick from `EVENT_SOURCE`: 10 ticks

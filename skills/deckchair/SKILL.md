@@ -25,7 +25,7 @@ sandbox and no undo. Act like a careful human operator.
 - **Bring the app to the front first.** Another window (the terminal) may hold focus. Call
   `activate_app("Windows App")` (any app name or bundle id), then check the screenshot shows it in front.
 - **Read, don't guess.** For values (amounts, dates, account numbers) call `find_text` with a `region`
-  around them and quote its text. For small text you only need to look at, use `zoom`.
+  around them and quote its text. A region is faster (~0.3 s) than the full screen (~2 s). For small text you only need to look at, use `zoom`.
 - **Click by label.** `find_text("Trial Balance")` returns the click point of the match itself; prefer it
   to estimating coordinates from a screenshot. OCR reads English, Ukrainian, Russian and digits, not Hebrew.
 - **Zoom is for reading only.** Its pixels are not click points. To click something you saw in a zoom,
