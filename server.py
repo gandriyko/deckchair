@@ -4,7 +4,9 @@
 # ///
 import atexit
 import fcntl
+import math
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -19,6 +21,12 @@ mcp = FastMCP("deckchair")
 
 SETTLE_SECONDS = 0.4
 KEY_DELAY_SECONDS = 0.03
+# While recording, the mouse glides to the target and waits before and after each action, so a viewer
+# can follow it (the browser-qa video rules)
+GLIDE_SECONDS = 0.4
+VISIBLE_PAUSE_SECONDS = 0.7
+VIDEO_FPS = 15
+VIDEO_MAX_WIDTH = 1280
 CORNER_TOLERANCE = 1
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 held_lock = []
@@ -141,7 +149,7 @@ def _capture_jpeg() -> bytes:
 
 def _after_action() -> Image:
     # ponytail: fixed wait for the UI to redraw; raise it if RDP screenshots lag behind actions
-    time.sleep(SETTLE_SECONDS)
+    time.sleep(VISIBLE_PAUSE_SECONDS if recording else SETTLE_SECONDS)
     return screenshot()
 
 
@@ -152,6 +160,19 @@ def _post_mouse(event_type: int, x: float, y: float, button: int, click_state: i
 
 
 def _move_to(x: float, y: float) -> None:
+    if recording:
+        start_x, start_y = _mouse_position()
+        steps = 20
+        for step in range(1, steps + 1):
+            _post_mouse(
+                Quartz.kCGEventMouseMoved,
+                start_x + (x - start_x) * step / steps,
+                start_y + (y - start_y) * step / steps,
+                Quartz.kCGMouseButtonLeft,
+            )
+            time.sleep(GLIDE_SECONDS / steps)
+        time.sleep(VISIBLE_PAUSE_SECONDS)
+        return
     _post_mouse(Quartz.kCGEventMouseMoved, x, y, Quartz.kCGMouseButtonLeft)
     time.sleep(0.05)
 
@@ -300,39 +321,104 @@ def save_screenshot(path: str) -> str:
 recording = {}
 
 
+def _video_tool(name: str) -> str | None:
+    found = shutil.which(name) or f"/opt/homebrew/bin/{name}"
+    return found if Path(found).exists() else None
+
+
+def _video_seconds(path: Path) -> float:
+    probe = subprocess.run(
+        [_video_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(probe.stdout.strip())
+
+
+def _encode(raw: Path, target: Path) -> None:
+    # Constant 15 fps first (screencapture writes frames only on change), then mpdecimate with max=2 keeps
+    # every third frame of a still screen: pauses play 3x faster, motion stays real-time, a toast still shows.
+    video_filter = (
+        f"fps={VIDEO_FPS},mpdecimate=hi=64*24:lo=64*8:frac=0.2:max=2,setpts=N/{VIDEO_FPS}/TB,"
+        f"scale='min({VIDEO_MAX_WIDTH},iw)':-2:flags=lanczos,fps=30"
+    )
+    subprocess.run(
+        [
+            _video_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(raw), "-vf", video_filter,
+            "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(target),
+        ],
+        check=True,
+        timeout=900,
+    )
+
+
+def _contact_sheet(video: Path, seconds: float) -> tuple[Path, float]:
+    tile_seconds = max(1.0, seconds / 64)
+    tiles = max(1, math.ceil(seconds / tile_seconds))
+    columns, rows = min(8, tiles), math.ceil(tiles / 8)
+    sheet = Path(tempfile.gettempdir()) / f"{video.stem}-contact.jpg"
+    subprocess.run(
+        [
+            _video_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(video),
+            "-vf", f"fps=1/{tile_seconds:.3f},scale=240:-2,tile={columns}x{rows}", "-frames:v", "1", str(sheet),
+        ],
+        check=True,
+        timeout=120,
+    )
+    return sheet, tile_seconds
+
+
 @mcp.tool()
-def start_recording(path: str) -> str:
-    """Start recording the main display to a .mov file, with mouse clicks shown. Stop it with `stop_recording`."""
+def start_recording(path: str, region: list[int] | None = None) -> str:
+    """Start recording the screen to an .mp4 file, with mouse clicks shown. Stop it with `stop_recording`.
+    region: optional [x, y, width, height] in screenshot coordinates, e.g. only the RDP window.
+    While recording, the mouse glides to each target and pauses 0.7 s before and after the action."""
     _acquire_lock()
     if recording:
         raise RuntimeError(f"Already recording to {recording['path']}. Call stop_recording first.")
-    target = _output_path(path, (".mov",))
+    target = _output_path(path, (".mp4",))
+    raw = target.with_name(f"{target.stem}.raw.mov")
+    command = ["screencapture", "-v", "-x", "-k"]
+    if region:
+        x, y, width, height = region
+        command += ["-R", f"{x},{y},{width},{height}"]
+    else:
+        command.append("-m")
     process = subprocess.Popen(
-        ["screencapture", "-v", "-x", "-k", "-m", str(target)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        command + [str(raw)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
     time.sleep(1)
     if process.poll() is not None:
         raise RuntimeError(f"Recording failed to start: {process.stderr.read().decode().strip()}")
-    recording.update(process=process, path=target, started=time.monotonic())
+    recording.update(process=process, path=target, raw=raw)
     return f"Recording to {target}"
 
 
 @mcp.tool()
 def stop_recording() -> str:
-    """Stop the recording started by `start_recording` and return the file path, duration and size."""
+    """Stop the recording and encode it: duplicate still frames cut (pauses play faster), H.264, at most
+    1280 px wide. Returns the video path, duration, size and a contact sheet (up to 8x8 tiles) to check every
+    step is in the video. Without ffmpeg the raw .mov is kept instead."""
     if not recording:
         raise RuntimeError("Not recording.")
-    process, target, started = recording["process"], recording["path"], recording["started"]
+    process, target, raw = recording["process"], recording["path"], recording["raw"]
     recording.clear()
     process.send_signal(signal.SIGINT)
     process.wait(timeout=30)
-    if not target.exists():
-        raise RuntimeError(f"Recording stopped but no file was written: {target}")
-    seconds = time.monotonic() - started
-    return f"{target} ({seconds:.0f} s, {target.stat().st_size // 1024} KB)"
+    if not raw.exists():
+        raise RuntimeError(f"Recording stopped but no file was written: {raw}")
+    if not (_video_tool("ffmpeg") and _video_tool("ffprobe")):
+        return f"ffmpeg not found (brew install ffmpeg); raw recording kept: {raw}"
+    _encode(raw, target)
+    raw.unlink()
+    seconds = _video_seconds(target)
+    sheet, tile_seconds = _contact_sheet(target, seconds)
+    return (
+        f"{target} ({seconds:.1f} s, {target.stat().st_size // 1024} KB). "
+        f"Contact sheet: {sheet} (1 tile = {tile_seconds:.1f} s of video, left to right, top to bottom)"
+    )
 
 
 @atexit.register

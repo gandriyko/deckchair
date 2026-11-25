@@ -39,7 +39,18 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 | `type_text` | Type text into the focused field |
 | `key` | A key or combo: `enter`, `cmd+tab`, `shift+home`, `ctrl+alt+delete` |
 | `save_screenshot` | Save a full-resolution `.png` / `.jpg` to a file |
-| `start_recording` / `stop_recording` | Record the screen to a `.mov`, clicks shown |
+| `start_recording` / `stop_recording` | Record the screen or a region to an `.mp4`, clicks shown; returns a contact sheet |
+
+### Screen videos
+
+Recordings are made to be watched, not endured:
+
+- While recording, the mouse glides to each target and pauses 0.7 s before and after the action.
+- `stop_recording` cuts duplicate still frames (`mpdecimate`): pauses play 3× faster, motion stays real-time, a short toast stays visible.
+- H.264 MP4, at most 1280 px wide, `faststart`: plays inline in Jira, Slack and GitHub.
+- A contact sheet (up to 8×8 tiles) lets the agent check every step is in the video.
+
+The encoding needs [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`); without it the raw `.mov` is kept.
 
 ## Install
 

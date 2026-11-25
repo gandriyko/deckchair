@@ -13,6 +13,7 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 
 - One file, two dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP) and `pyobjc-framework-Quartz`,
   declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
+  Video encoding calls the `ffmpeg` / `ffprobe` binaries when present; everything else works without them.
 - After every change run `uv run --script check.py`. It takes the lock: stop a session that uses
   Deckchair first. Then the user reconnects the server in `/mcp`; a newly added server needs a new session.
 - Every new tool or changed tool behaviour goes into `README.md` (Tools table) and
@@ -35,5 +36,9 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   `CGEvent` coordinates on Retina.
 - **Scroll in RDP.** One `kCGScrollEventUnitLine` event per wheel tick from `EVENT_SOURCE`: 10 ticks
   move an RDP grid ~160 px. pyautogui's scroll moved it ~16 px.
+- **Video frames.** `screencapture -v` writes a frame only when the screen changes (variable rate,
+  120 Hz time base). Normalise to `fps=15` before `mpdecimate`, or `setpts` plays it at the wrong speed.
+  Never drop `max=2` from `mpdecimate`: without it still frames vanish and toasts only flash. The video
+  rules come from the `browser-qa` skill (`~/.claude/skills/browser-qa/SKILL.md`, section 6).
 - **Focus.** A terminal multiplexer (Herdr) can take focus after file edits; the agent re-activates
   the target app (Dock click) before acting.

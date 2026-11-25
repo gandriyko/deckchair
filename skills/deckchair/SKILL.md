@@ -44,9 +44,38 @@ sandbox and no undo. Act like a careful human operator.
 - If scrolling moves too little, click the scrollbar track instead.
 - RDP redraws slowly: if the returned screenshot shows the old state, call `screenshot` once more.
 
-## Evidence
+## Evidence: screenshots and video
 
-- `save_screenshot(path)` writes a full-resolution `.png` / `.jpg` and returns its path.
-- `start_recording(path)` records the screen to a `.mov` with clicks shown; `stop_recording()` returns
-  the path, length and size. Always stop a recording you started, also after an error.
-- Use absolute paths the user can open, for example in the project or `~/Desktop`.
+**Video or screenshots?** A flow (click → dialog → result, filter → rows) needs a video. A static
+result (a value in a report, a field's look) needs 1–3 screenshots, each showing one state. Something
+the screen never shows (a DB field, an API response) needs neither: say so and name the check that fits.
+
+### Screenshots
+
+- `save_screenshot(path)` writes the full-resolution `.png` / `.jpg` (2× on Retina). Never scale it
+  down: crop only, the text must stay readable.
+- Read the saved file to check the result is in the frame.
+
+### Video
+
+- Name it `~/Downloads/<ticket>-<what>.mp4`, `<what>` a few kebab-case words naming the check
+  (`DA-20535-bank-balance-report.mp4`). Without a ticket, just `<what>.mp4`. One video per check; a
+  re-record of the same check overwrites its file.
+- **Rehearse first.** Run the scenario once without recording (reset any data it changed). The video
+  shows every miss.
+- Pass `region` to `start_recording` to record only the app window (for RDP: the Windows App window
+  without the macOS menu bar and Dock). Take it from a screenshot: `[x, y, width, height]`.
+- While recording, the mouse glides to each target and pauses 0.7 s before and after the action, so a
+  viewer can follow. Don't add your own waits for that; wait only for slow loads, 1–3 s.
+- Re-check coordinates in the returned screenshot before each click: dialogs and toasts shift layouts.
+- Hold the final state ~2 s before `stop_recording`, so the result stays on screen.
+- `stop_recording()` encodes the video: still stretches play 3× faster (`mpdecimate`, `max=2`, so a
+  short toast stays visible), H.264, up to 1280 px wide. Without ffmpeg it keeps the raw `.mov`.
+- Always stop a recording you started, also after an error or an abort.
+
+### Check the video before reporting it
+
+1. Read the contact sheet `stop_recording` returns (1 tile = the seconds it states). Every step of
+   the scenario must be in a tile, with no missing step and no long run of identical tiles.
+2. The duration must be plausible: far shorter than the scenario means a broken recording.
+3. Report the path, duration, size and what the video shows step by step.

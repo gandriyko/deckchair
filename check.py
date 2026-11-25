@@ -56,9 +56,34 @@ print("fail-safe: all four corners abort")
 with tempfile.TemporaryDirectory() as folder:
     shot = Path(server.save_screenshot(f"{folder}/shots/screen.png"))
     assert shot.stat().st_size > 0
-    server.start_recording(f"{folder}/video.mov")
-    time.sleep(2)
+    print(f"save_screenshot: {shot.stat().st_size // 1024} KB")
+
+    video = Path(folder, "video.mp4")
+    wall_start = time.monotonic()
+    server.start_recording(str(video), region=[200, 200, 800, 450])
+    time.sleep(4)
+    glide_start = time.monotonic()
+    server.move(600, 400)
+    glide_seconds = time.monotonic() - glide_start
+    server.move(300, 300)
+    time.sleep(1)
     summary = server.stop_recording()
-    assert Path(folder, "video.mov").stat().st_size > 0, summary
-    print(f"files: screenshot {shot.stat().st_size // 1024} KB, video {summary.split('(')[1].rstrip(')')}")
+    wall_seconds = time.monotonic() - wall_start
+    assert glide_seconds >= server.GLIDE_SECONDS + server.VISIBLE_PAUSE_SECONDS, glide_seconds
+    assert not Path(folder, "video.raw.mov").exists(), "raw recording left behind"
+    probe = subprocess.run(
+        [server._video_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(video)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    codec, width, height = probe.split(",")
+    video_seconds = server._video_seconds(video)
+    assert codec == "h264" and int(width) == 1280, probe
+    assert video_seconds < wall_seconds * 0.8, (video_seconds, wall_seconds)
+    sheet = Path(summary.split("Contact sheet: ")[1].split(" (")[0])
+    assert sheet.stat().st_size > 0
+    print(
+        f"video: {codec} {width}x{height}, {video_seconds:.1f} s from {wall_seconds:.1f} s recorded, "
+        f"move while recording {glide_seconds:.1f} s, contact sheet ok"
+    )
 print("OK")
