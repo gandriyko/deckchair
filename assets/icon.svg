@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- A deckchair (rest) with a mouse cursor (desktop control). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E2F45"/>
+      <stop offset="1" stop-color="#06161F"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <path d="M300 330 Q400 660 700 560 L670 520 Q440 600 360 310 Z" fill="#FB923C" opacity="0.9"/>
+  <g fill="none" stroke="#FDE7C8" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M300 300 L600 790"/>
+    <path d="M350 790 L720 540"/>
+    <path d="M300 300 L360 300"/>
+  </g>
+  <path transform="translate(640 200) scale(1.05)"
+        d="M0 0 L0 170 L45 128 L78 200 L108 186 L76 116 L136 116 Z"
+        fill="#FDE7C8" stroke="#06161F" stroke-width="12" stroke-linejoin="round"/>
+</svg>
