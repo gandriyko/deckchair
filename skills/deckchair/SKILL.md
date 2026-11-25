@@ -38,9 +38,10 @@ sandbox and no undo. Act like a careful human operator.
 
 ## Remote Desktop (Windows App)
 
-- Clicks, menus, scroll, ASCII text and modifier combos work.
-- `type_text` types ASCII only inside RDP. Cyrillic or other non-ASCII text arrives as `a`: ask the
-  user to type it.
+- Clicks, menus, scroll, text and modifier combos work.
+- Cyrillic and other non-ASCII text work too: `type_text` pastes it through the clipboard (one paste
+  per call, ~2 s, the window flicks to Finder and back). Pass a whole field value in one call, not word
+  by word. The user's clipboard is restored afterwards.
 - If scrolling moves too little, click the scrollbar track instead.
 - RDP redraws slowly: if the returned screenshot shows the old state, call `screenshot` once more.
 

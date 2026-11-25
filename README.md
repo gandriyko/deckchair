@@ -86,9 +86,12 @@ Deckchair sends real key codes, left/right modifier bits and HID-state events, s
 
 | Works in RDP | Limits |
 |---|---|
-| Clicks, menus, drop-downs, scroll | `type_text` types ASCII only; Cyrillic needs a clipboard paste |
-| Text with capitals and symbols | Main display only |
+| Clicks, menus, drop-downs, scroll | Main display only |
+| Text with capitals and symbols | Non-ASCII text takes ~2 s per `type_text` call |
+| Cyrillic and other non-ASCII text, through the clipboard | The window flicks to Finder and back once per paste |
 | `shift`, `ctrl`, `alt`, `cmd` combos | |
+
+Non-ASCII text can't be typed into RDP: the client sends key codes only. `type_text` puts the whole text on the clipboard, switches to Finder and back (Windows App syncs the clipboard to the remote side only when it becomes active), presses `ctrl+v` and restores your clipboard. The remote clipboard keeps the pasted text.
 
 ## AI agents
 

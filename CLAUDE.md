@@ -27,6 +27,11 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   state through the HID system state and the left/right device bits. Keep all three: events from
   `EVENT_SOURCE` (`kCGEventSourceStateHIDSystemState`), modifiers as `kCGEventFlagsChanged` with
   `NX_DEVICEL*KEYMASK` bits in `MODIFIERS`, and a real key code plus the Unicode string per character.
+- **Non-ASCII in RDP.** Key codes can't carry Cyrillic, so `type_text` pastes through the clipboard.
+  Windows App syncs the Mac clipboard to the remote side only when it becomes the active app: without
+  the Finder-and-back switch every paste repeats the first text, even 2 s later. The remote fetches the
+  data on paste, asynchronously: restore the clipboard 1 s after `ctrl+v`, and use one paste per call
+  (several quick pastes arrive out of order).
 - **pyautogui-style modifiers fail.** A modifier key-down without flags on the event never reaches
   `cmd+tab` / `cmd+space`.
 - **Screenshot stall.** `CGWindowListCreateImage` waits 30 s (and `CGDisplayCreateImage` fails after 5 s)

@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import AppKit
 import Foundation
 import Quartz
 from mcp.server.fastmcp import FastMCP, Image
@@ -28,6 +29,9 @@ VISIBLE_PAUSE_SECONDS = 0.7
 VIDEO_FPS = 15
 VIDEO_MAX_WIDTH = 1280
 CORNER_TOLERANCE = 1
+# ponytail: Windows App / Microsoft Remote Desktop only; add the bundle IDs of other RDP / VNC clients here
+RDP_APPS = {"com.microsoft.rdc.macos"}
+CLIPBOARD_SYNC_SECONDS = 1.0
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 held_lock = []
 
@@ -270,20 +274,70 @@ def scroll(x: int, y: int, amount: int) -> Image:
 
 @mcp.tool()
 def type_text(text: str) -> Image:
-    """Type text into the focused field. ASCII works everywhere, including RDP; non-ASCII (Cyrillic) works only in
-    macOS apps."""
+    """Type text into the focused field. Any text, Cyrillic included. Inside an RDP client non-ASCII text is
+    pasted through the clipboard (ctrl+v on the remote side); the user's clipboard is restored afterwards."""
+    _check_abort()
+    if _frontmost_app() in RDP_APPS and any(_char_key(char) is None for char in text):
+        # one paste for the whole text: the client syncs the clipboard slowly, and a second paste soon after
+        # the first one inserts the first text again
+        _paste_in_rdp(text)
+        return _after_action()
     shift = [MODIFIERS["shift"]]
     for char in text:
         _check_abort()
         key = _char_key(char)
         if key is None:
-            # ponytail: keycode 0 + Unicode string; macOS apps read the string, RDP reads only the keycode and
-            # types 'a'. Paste via clipboard if Cyrillic inside RDP is needed.
+            # keycode 0 + Unicode string: macOS apps read the string
             _press(0, [], char)
         else:
             keycode, needs_shift = key
             _press(keycode, shift if needs_shift else [], char)
     return _after_action()
+
+
+def _frontmost_app() -> str | None:
+    return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication().bundleIdentifier()
+
+
+def _save_clipboard() -> list[dict]:
+    board = AppKit.NSPasteboard.generalPasteboard()
+    return [{kind: item.dataForType_(kind) for kind in item.types()} for item in board.pasteboardItems() or []]
+
+
+def _restore_clipboard(saved: list[dict]) -> None:
+    board = AppKit.NSPasteboard.generalPasteboard()
+    board.clearContents()
+    items = []
+    for content in saved:
+        item = AppKit.NSPasteboardItem.alloc().init()
+        for kind, data in content.items():
+            if data is not None:
+                item.setData_forType_(data, kind)
+        items.append(item)
+    if items:
+        board.writeObjects_(items)
+
+
+def _paste_in_rdp(text: str) -> None:
+    # RDP clients send key codes only, so a non-ASCII character can't be typed; the clipboard is redirected instead
+    saved = _save_clipboard()
+    board = AppKit.NSPasteboard.generalPasteboard()
+    board.clearContents()
+    board.setString_forType_(text, AppKit.NSPasteboardTypeString)
+    # Windows App sends a clipboard change to the remote side only when it becomes the active app, not when the
+    # clipboard changes: switch to Finder and back. The caret in the remote field stays where it was.
+    rdp_app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    for app in [_running_app("com.apple.finder"), rdp_app]:
+        app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+        time.sleep(0.3)
+    _press(KEYCODES["v"], [MODIFIERS["ctrl"]])
+    # the remote fetches the data only on paste and asynchronously: restore too early and it pastes the old text
+    time.sleep(CLIPBOARD_SYNC_SECONDS)
+    _restore_clipboard(saved)
+
+
+def _running_app(bundle_id: str):
+    return AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)[0]
 
 
 @mcp.tool()

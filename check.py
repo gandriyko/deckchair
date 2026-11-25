@@ -22,6 +22,16 @@ second = subprocess.run(
 assert second.returncode != 0 and "already in use" in second.stderr, second.stderr
 print("lock: a second process is refused")
 
+original_clipboard = server._save_clipboard()
+subprocess.run(["pbcopy"], input="clipboard check ✓".encode(), check=True)
+saved = server._save_clipboard()
+subprocess.run(["pbcopy"], input=b"overwritten", check=True)
+server._restore_clipboard(saved)
+restored = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
+server._restore_clipboard(original_clipboard)
+assert restored == "clipboard check ✓", restored
+print("clipboard: saved and restored")
+
 for char in string.ascii_letters + string.digits + string.punctuation + " \n\t":
     assert server._char_key(char) is not None, f"no keycode for {char!r}"
 assert server._char_key("П") is None
