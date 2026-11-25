@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision"]
+# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
 # ///
 import atexit
 import fcntl
@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from pathlib import Path
 import AppKit
 import Foundation
 import Quartz
+import ScreenCaptureKit
 import Vision
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -50,6 +52,9 @@ LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 LOG_DIR = Path.home() / ".deckchair"
 held_lock = []
 selected_display = [Quartz.CGMainDisplayID()]
+sck_displays = {}
+last_capture_api = [""]
+SCK_TIMEOUT_SECONDS = 10
 
 # RDP/VM clients read modifier state from the HID system state; events without this source don't update it
 EVENT_SOURCE = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
@@ -213,17 +218,75 @@ def _logged(tool):
 
 
 def _capture_native():
-    """The selected display at native resolution (2x on Retina) and its scale: native pixels per screenshot pixel."""
-    bounds = _display_bounds()
-    # ponytail: deprecated CGWindowListCreateImage (~25 ms). It stalls 30 s while another process of the same Python
-    # binary has captured the screen; the lock prevents that between Deckchair processes. Move to ScreenCaptureKit
-    # if a macOS release removes the API, or fall back to the screencapture CLI (~160 ms).
-    image = Quartz.CGWindowListCreateImage(
-        bounds, Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault
+    """The selected display at native resolution (2x on Retina) and its scale: native pixels per screenshot pixel.
+    ScreenCaptureKit (~37 ms with pixels), falling back to the deprecated CGWindowListCreateImage (~30 ms) if it
+    fails. Both stall while another live process of the same Python binary has captured the screen (SCK doesn't
+    answer, the legacy call waits 30 s); the lock prevents that between Deckchair processes."""
+    _display_bounds()
+    try:
+        image = _capture_sck(selected_display[0])
+        last_capture_api[0] = "ScreenCaptureKit"
+    except (RuntimeError, TimeoutError, KeyError):
+        image = _capture_legacy()
+        last_capture_api[0] = "CGWindowListCreateImage"
+    return image, Quartz.CGImageGetWidth(image) / _screen_size()[0]
+
+
+def _sck_wait(call) -> tuple:
+    """Call a ScreenCaptureKit method with a completion handler and wait for it. The handler runs on a background
+    queue, so an Event works in this run-loop-less server."""
+    done = threading.Event()
+    answer = {}
+
+    def handler(*values):
+        answer["values"] = values
+        done.set()
+
+    call(handler)
+    if not done.wait(SCK_TIMEOUT_SECONDS):
+        raise TimeoutError(f"ScreenCaptureKit did not answer in {SCK_TIMEOUT_SECONDS} s")
+    return answer["values"]
+
+
+def _sck_display(display_id: int):
+    # SCShareableContent costs ~50 ms: cache the SCDisplay objects, refetch when a display appears
+    if display_id not in sck_displays:
+        content, error = _sck_wait(ScreenCaptureKit.SCShareableContent.getShareableContentWithCompletionHandler_)
+        if content is None:
+            raise RuntimeError(f"ScreenCaptureKit: no shareable content ({error})")
+        sck_displays.clear()
+        sck_displays.update({display.displayID(): display for display in content.displays()})
+    return sck_displays[display_id]
+
+
+def _capture_sck(display_id: int):
+    mode = Quartz.CGDisplayCopyDisplayMode(display_id)
+    content_filter = ScreenCaptureKit.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+        _sck_display(display_id), []
+    )
+    config = ScreenCaptureKit.SCStreamConfiguration.alloc().init()
+    config.setWidth_(Quartz.CGDisplayModeGetPixelWidth(mode))
+    config.setHeight_(Quartz.CGDisplayModeGetPixelHeight(mode))
+    config.setShowsCursor_(False)
+    image, error = _sck_wait(
+        lambda handler: ScreenCaptureKit.SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
+            content_filter, config, handler
+        )
+    )
+    if image is None:
+        sck_displays.clear()
+        raise RuntimeError(f"ScreenCaptureKit capture failed: {error}")
+    return image
+
+
+def _capture_legacy():
+    capture = getattr(Quartz, "CGWindowListCreateImage", None)
+    image = capture and capture(
+        _display_bounds(), Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault
     )
     if image is None:
         raise RuntimeError("Screen capture failed: grant Screen Recording to the terminal app and restart it.")
-    return image, Quartz.CGImageGetWidth(image) / _screen_size()[0]
+    return image
 
 
 def _crop(image, scale: float, region: list[int]):

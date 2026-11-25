@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision"]
+# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
 # ///
 import asyncio
 import json
@@ -46,7 +46,23 @@ source = Quartz.CGImageSourceCreateWithData(jpeg, None)
 image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None)
 size = (Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image))
 assert size == server._screen_size(), (size, server._screen_size())
-print(f"screenshot {size[0]}x{size[1]}, {len(jpeg) // 1024} KB, {elapsed_ms:.0f} ms")
+main_api = server.last_capture_api[0]
+assert main_api == "ScreenCaptureKit", main_api
+legacy_image = server._capture_legacy()
+assert Quartz.CGImageGetWidth(legacy_image) == Quartz.CGImageGetWidth(server._capture_native()[0])
+working_sck = server._capture_sck
+
+
+def broken_sck(display_id):
+    raise TimeoutError("simulated ScreenCaptureKit failure")
+
+
+server._capture_sck = broken_sck
+fallback_image, _ = server._capture_native()
+assert server.last_capture_api[0] == "CGWindowListCreateImage", server.last_capture_api
+server._capture_sck = working_sck
+print(f"screenshot {size[0]}x{size[1]}, {len(jpeg) // 1024} KB, {elapsed_ms:.0f} ms via {main_api}; "
+      f"a failing ScreenCaptureKit falls back to {server.last_capture_api[0]} at the same size")
 
 def log_entries() -> list[dict]:
     if not server._log_path().exists():

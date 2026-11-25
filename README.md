@@ -27,7 +27,7 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 - 🛑 **You can always stop it.** Push the mouse into any screen corner and every action aborts.
 - 🔒 **One driver at a time.** A lock keeps two sessions from fighting over the mouse.
 - 🔎 **Reads the screen exactly.** OCR returns the text and where it is, so numbers aren't guessed from pixels.
-- 🪶 **One file, three dependencies.** `server.py` with `mcp`, `pyobjc-framework-Quartz` and `pyobjc-framework-Vision`, run by `uv`.
+- 🪶 **One file, four dependencies.** `server.py` with `mcp` and the PyObjC frameworks Quartz, Vision and ScreenCaptureKit, run by `uv`.
 
 ## Tools
 

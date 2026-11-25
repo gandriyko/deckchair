@@ -11,8 +11,8 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 
 ## Rules
 
-- One file, three dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP), `pyobjc-framework-Quartz` and
-  `pyobjc-framework-Vision`, declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
+- One file, four dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP), `pyobjc-framework-Quartz`,
+  `pyobjc-framework-Vision` and `pyobjc-framework-ScreenCaptureKit`, declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
   Video encoding calls the `ffmpeg` / `ffprobe` binaries when present; everything else works without them.
 - After every change run `uv run --script check.py`. It takes the lock: stop a session that uses
   Deckchair first. Then the user reconnects the server in `/mcp`; a newly added server needs a new session.
@@ -41,9 +41,14 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   first OCR call on a Mac took 34 s; later calls take 90–230 ms.
 - **pyautogui-style modifiers fail.** A modifier key-down without flags on the event never reaches
   `cmd+tab` / `cmd+space`.
-- **Screenshot stall.** `CGWindowListCreateImage` waits 30 s (and `CGDisplayCreateImage` fails after 5 s)
-  while another live process of the same Python binary has captured the screen. The lock prevents it
-  between Deckchair processes. `screencapture` (the CLI) is not affected; files use it.
+- **Capture API.** ScreenCaptureKit (`SCScreenshotManager`, ~37 ms with pixels read; ~200 ms the first
+  time in a process), falling back to the deprecated `CGWindowListCreateImage` (~30 ms with pixels; it
+  returns in 12 ms and renders lazily). SCK is async: `_sck_wait` waits on a `threading.Event`, the
+  handler runs on a background queue. `SCShareableContent` (~50 ms) is cached per display.
+- **Screenshot stall.** While another live process of the same Python binary has captured the screen,
+  SCK doesn't answer at all and `CGWindowListCreateImage` waits 30 s (`CGDisplayCreateImage` fails after
+  5 s). The lock prevents it between Deckchair processes; stop the session's server before running
+  `check.py` or a test script. `screencapture` (the CLI) is not affected; files use it.
 - **Coordinates are screenshot pixels.** A screenshot is the display in points, shrunk to
   `SCREENSHOT_MAX_EDGE` (1568) on the long edge: Claude Code shrinks wider images before the model sees
   them (a 2304 px screenshot showed at 2000, every click missed by 15%). `_points_per_pixel()` scales
