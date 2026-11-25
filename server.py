@@ -25,6 +25,9 @@ from mcp.server.fastmcp import FastMCP, Image
 
 mcp = FastMCP("deckchair")
 
+# Longest screenshot edge in pixels: larger images are shrunk by the client before the model sees them, so the
+# model's coordinates would not match; 1568 is the size Anthropic recommends for images
+SCREENSHOT_MAX_EDGE = 1568
 SETTLE_SECONDS = 0.4
 KEY_DELAY_SECONDS = 0.03
 # While recording, the mouse glides to the target and waits before and after each action, so a viewer
@@ -39,6 +42,7 @@ RDP_APPS = {"com.microsoft.rdc.macos"}
 CLIPBOARD_SYNC_SECONDS = 1.0
 # Vision OCR on this Mac has no Hebrew: Hebrew labels are not read, digits next to them are
 OCR_LANGUAGES = ["en-US", "uk-UA", "ru-RU"]
+OCR_MAX_ASPECT = 8
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 LOG_DIR = Path.home() / ".deckchair"
 held_lock = []
@@ -102,9 +106,19 @@ def _display_bounds():
     return Quartz.CGDisplayBounds(selected_display[0])
 
 
-def _screen_size() -> tuple[int, int]:
+def _points_per_pixel() -> float:
+    """Screen points per screenshot pixel. Tools speak screenshot pixels: a display larger than
+    SCREENSHOT_MAX_EDGE gets a smaller screenshot (the client shrinks wider images anyway, and the model's
+    coordinates then miss), and every coordinate is scaled back to points here."""
     bounds = _display_bounds()
-    return int(bounds.size.width), int(bounds.size.height)
+    return max(1.0, max(bounds.size.width, bounds.size.height) / SCREENSHOT_MAX_EDGE)
+
+
+def _screen_size() -> tuple[int, int]:
+    """The screenshot size in pixels = the coordinate range of every tool."""
+    bounds = _display_bounds()
+    scale = _points_per_pixel()
+    return round(bounds.size.width / scale), round(bounds.size.height / scale)
 
 
 def _mouse_global() -> tuple[float, float]:
@@ -115,7 +129,8 @@ def _mouse_global() -> tuple[float, float]:
 def _mouse_position() -> tuple[float, float]:
     x, y = _mouse_global()
     bounds = _display_bounds()
-    return x - bounds.origin.x, y - bounds.origin.y
+    scale = _points_per_pixel()
+    return (x - bounds.origin.x) / scale, (y - bounds.origin.y) / scale
 
 
 def _acquire_lock() -> None:
@@ -195,7 +210,7 @@ def _logged(tool):
 
 
 def _capture_native():
-    """The selected display at native resolution (2x on Retina) and its scale: native pixels per screen point."""
+    """The selected display at native resolution (2x on Retina) and its scale: native pixels per screenshot pixel."""
     bounds = _display_bounds()
     # ponytail: deprecated CGWindowListCreateImage (~25 ms). It stalls 30 s while another process of the same Python
     # binary has captured the screen; the lock prevents that between Deckchair processes. Move to ScreenCaptureKit
@@ -205,7 +220,7 @@ def _capture_native():
     )
     if image is None:
         raise RuntimeError("Screen capture failed: grant Screen Recording to the terminal app and restart it.")
-    return image, Quartz.CGImageGetWidth(image) / bounds.size.width
+    return image, Quartz.CGImageGetWidth(image) / _screen_size()[0]
 
 
 def _crop(image, scale: float, region: list[int]):
@@ -241,7 +256,8 @@ def _after_action() -> Image:
 
 def _post_mouse(event_type: int, x: float, y: float, button: int, click_state: int = 1, flags: int = 0) -> None:
     bounds = _display_bounds()
-    point = (bounds.origin.x + x, bounds.origin.y + y)
+    scale = _points_per_pixel()
+    point = (bounds.origin.x + x * scale, bounds.origin.y + y * scale)
     event = Quartz.CGEventCreateMouseEvent(EVENT_SOURCE, event_type, point, button)
     Quartz.CGEventSetIntegerValueField(event, Quartz.kCGMouseEventClickState, click_state)
     if flags:
@@ -324,12 +340,29 @@ def activate_app(name: str) -> Image:
 
 @mcp.tool()
 def zoom(x: int, y: int, width: int, height: int) -> Image:
-    """Look closely at part of the screen: the region [x, y, width, height] (screenshot coordinates) at native
-    resolution, 2x on Retina, sharp enough to read small text and digits. Pixels of this image are not click
-    coordinates: a point (px, py) in it is (x + px / 2, y + py / 2) on screen on Retina."""
+    """Look closely at part of the screen: the region [x, y, width, height] (screenshot coordinates) at the
+    display's native resolution, sharp enough to read small text and digits. Only for reading: its pixels are
+    not click coordinates. To click what you see in it, use `find_text` or the screenshot coordinates."""
     _acquire_lock()
     image, scale = _capture_native()
+    if max(width, height) * scale > SCREENSHOT_MAX_EDGE:
+        limit = int(SCREENSHOT_MAX_EDGE / scale)
+        raise ValueError(f"Region too large to zoom on this display: keep width and height under {limit}.")
     return Image(data=_encode_image(_crop(image, scale, [x, y, width, height]), "public.png"), format="png")
+
+
+def _ocr_region(region: list[int], screen_width: int, screen_height: int) -> list[int]:
+    """Vision misses text in long thin images (a 1568x40 menu-bar strip found nothing, 784x40 worked): grow the
+    short side to at least 1/OCR_MAX_ASPECT of the long one, staying on screen. find_text keeps only lines whose
+    centre is in the requested region."""
+    x, y, width, height = region
+    if width > height * OCR_MAX_ASPECT:
+        height = min(screen_height, math.ceil(width / OCR_MAX_ASPECT))
+        y = max(0, min(y, screen_height - height))
+    elif height > width * OCR_MAX_ASPECT:
+        width = min(screen_width, math.ceil(height / OCR_MAX_ASPECT))
+        x = max(0, min(x, screen_width - width))
+    return [x, y, width, height]
 
 
 @mcp.tool()
@@ -340,11 +373,12 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
     to read only part of the screen. Use it to read exact numbers instead of guessing them from a screenshot."""
     _acquire_lock()
     image, scale = _capture_native()
-    origin_x, origin_y = 0, 0
-    width, height = _screen_size()
+    screen_width, screen_height = _screen_size()
+    origin_x, origin_y, width, height = 0, 0, screen_width, screen_height
+    wanted = region
     if region:
-        origin_x, origin_y, width, height = region
-        image = _crop(image, scale, region)
+        origin_x, origin_y, width, height = _ocr_region(region, screen_width, screen_height)
+        image = _crop(image, scale, [origin_x, origin_y, width, height])
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     request.setUsesLanguageCorrection_(False)
@@ -370,6 +404,11 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
         box_x = round(origin_x + box.origin.x * width)
         box_y = round(origin_y + (1 - box.origin.y - box.size.height) * height)
         box_width, box_height = round(box.size.width * width), round(box.size.height * height)
+        centre_x, centre_y = box_x + box_width // 2, box_y + box_height // 2
+        if wanted and not (
+            wanted[0] <= centre_x <= wanted[0] + wanted[2] and wanted[1] <= centre_y <= wanted[1] + wanted[3]
+        ):
+            continue
         found.append((box_y, box_x, f"{line!r} at ({box_x + box_width // 2}, {box_y + box_height // 2}) "
                                     f"box [{box_x}, {box_y}, {box_width}, {box_height}]"))
     if not found:
@@ -661,9 +700,10 @@ def start_recording(path: str, region: list[int] | None = None) -> str:
     raw = target.with_name(f"{target.stem}.raw.mov")
     command = ["screencapture", "-v", "-x", "-k"]
     if region:
-        x, y, width, height = region
         bounds = _display_bounds()
-        command += ["-R", f"{int(bounds.origin.x + x)},{int(bounds.origin.y + y)},{width},{height}"]
+        scale = _points_per_pixel()
+        x, y, width, height = (round(value * scale) for value in region)
+        command += ["-R", f"{int(bounds.origin.x) + x},{int(bounds.origin.y) + y},{width},{height}"]
     else:
         command += ["-D", _screencapture_display()]
     process = subprocess.Popen(

@@ -23,6 +23,7 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 - 🖥️ **The whole desktop, not just a browser.** Any app: native, Electron, or a Windows app inside Microsoft Windows App (RDP).
 - 🔌 **Works on any Claude plan.** Claude Code's built-in computer use needs Pro / Max / Ultra; Deckchair is a plain MCP server.
 - 👀 **Every action shows its result.** Each click, key and scroll returns a fresh screenshot.
+- 📐 **Any display size.** Screenshots are at most 1568 px on the long edge; the agent clicks in screenshot pixels and Deckchair scales them to the screen, from a 13" laptop to a 5K monitor.
 - 🛑 **You can always stop it.** Push the mouse into any screen corner and every action aborts.
 - 🔒 **One driver at a time.** A lock keeps two sessions from fighting over the mouse.
 - 🔎 **Reads the screen exactly.** OCR returns the text and where it is, so numbers aren't guessed from pixels.
@@ -33,7 +34,7 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 | Tool | What it does |
 |---|---|
 | `screenshot` | Screenshot of the selected display; image pixels equal click coordinates |
-| `zoom` | A region at native (2×) resolution, to read small text and digits |
+| `zoom` | A region at the display's native resolution, to read small text and digits |
 | `find_text` | OCR (macOS Vision): text lines with click points; find a label and click it, read exact numbers |
 | `activate_app` | Bring an app to the front by name or bundle id, launching it if needed |
 | `click` | Left, right or middle click; `clicks=2` for a double click; `modifiers="shift"` / `"cmd"` / `"ctrl"` held during it |

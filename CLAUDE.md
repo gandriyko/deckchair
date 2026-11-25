@@ -44,9 +44,14 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 - **Screenshot stall.** `CGWindowListCreateImage` waits 30 s (and `CGDisplayCreateImage` fails after 5 s)
   while another live process of the same Python binary has captured the screen. The lock prevents it
   between Deckchair processes. `screencapture` (the CLI) is not affected; files use it.
-- **Coordinates.** Screenshots are scaled to the display size in points, so image pixels equal
-  coordinates on Retina. Tool coordinates are relative to the selected display: `_post_mouse` adds its
-  origin (a display left of the main one has a negative x); `_mouse_position` subtracts it.
+- **Coordinates are screenshot pixels.** A screenshot is the display in points, shrunk to
+  `SCREENSHOT_MAX_EDGE` (1568) on the long edge: Claude Code shrinks wider images before the model sees
+  them (a 2304 px screenshot showed at 2000, every click missed by 15%). `_points_per_pixel()` scales
+  back: `_post_mouse` multiplies and adds the selected display's origin (negative x left of the main),
+  `_mouse_position` reverses it, `_capture_native` returns native pixels per screenshot pixel for crops.
+  `CGWarpMouseCursorPosition` and `_mouse_global` stay in global points.
+- **OCR of thin regions.** Vision finds nothing in a long thin image (1568x40 menu bar: no text; 784x40:
+  fine). `_ocr_region` grows the short side to 1/8 of the long one; results outside the request are dropped.
 - **Displays.** `_displays()` puts the main display first; `screencapture -D` numbers them the same way
   (checked with a 5K main display and the built-in one). The fail-safe checks the corners of every display.
 - **Scroll in RDP.** One `kCGScrollEventUnitLine` event per wheel tick from `EVENT_SOURCE`: 10 ticks

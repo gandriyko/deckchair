@@ -16,8 +16,9 @@ sandbox and no undo. Act like a careful human operator.
 - **Everything you do is logged.** Acting calls go to `~/.deckchair/actions-YYYY-MM-DD.jsonl` (one
   file per day) with their arguments. When the user asks what you did, read that day's file instead of
   recalling; filter by `time` or `pid` rather than reading a whole long day.
-- **Coordinates are image pixels.** Click the centre of the target as it appears in the latest
-  screenshot. Never reuse coordinates from an older screenshot after the layout changed.
+- **Coordinates are screenshot pixels**, on any display: the server scales them to the screen. Click the
+  centre of the target as it appears in the latest screenshot. Never reuse coordinates from an older
+  screenshot after the layout changed or after `use_display`.
 - **Several displays.** Tools work on one selected display (the main one at start). If the app is
   not on it, call `list_displays`, then `use_display(index)`; coordinates are then relative to that
   display. `find_text` on each display finds which one holds a window.
@@ -27,8 +28,8 @@ sandbox and no undo. Act like a careful human operator.
   around them and quote its text. For small text you only need to look at, use `zoom`.
 - **Click by label.** `find_text("Trial Balance")` returns the click point of the match itself; prefer it
   to estimating coordinates from a screenshot. OCR reads English, Ukrainian, Russian and digits, not Hebrew.
-- **Zoom pixels are not click points.** In a `zoom` image a point (px, py) is (x + px / 2, y + py / 2) on
-  screen on Retina.
+- **Zoom is for reading only.** Its pixels are not click points. To click something you saw in a zoom,
+  take its point from `find_text` or the screenshot.
 - **Stop on abort.** An error with `ABORTED BY USER` means the user pushed the mouse into a corner.
   Stop all desktop actions at once, take no screenshot, and ask the user how to proceed.
 - **Lock error.** "Deckchair is already in use by another process" means another session drives the
@@ -53,6 +54,12 @@ sandbox and no undo. Act like a careful human operator.
 ## Remote Desktop (Windows App)
 
 - Clicks, menus, scroll, text and modifier combos work.
+- **Check the Windows keyboard layout before typing.** ASCII goes into RDP as key codes, and Windows
+  turns them into characters by its own layout: with a Ukrainian layout active, "Trial" arrives as
+  "Екшфд". Before the first `type_text` in a session, call `find_text("ENG", region=...)` with a
+  region around the Windows taskbar's right end (the language indicator next to the clock). Never search
+  the whole screen: "ENG" in a terminal or chat text gives a false match. If it is not there, ask the
+  user to switch Windows to English; don't switch it yourself. The Mac layout doesn't matter.
 - Cyrillic and other non-ASCII text work too: `type_text` pastes it through the clipboard (one paste
   per call, ~2 s, the window flicks to Finder and back). Pass a whole field value in one call, not word
   by word. The user's clipboard is restored afterwards.

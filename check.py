@@ -55,9 +55,12 @@ def log_entries() -> list[dict]:
 
 
 log_start = len(log_entries())
-original = server._mouse_position()
+original = server._mouse_global()
 width, height = server._screen_size()
-for corner in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
+bounds = server._display_bounds()
+left, top = bounds.origin.x, bounds.origin.y
+right, bottom = left + bounds.size.width - 1, top + bounds.size.height - 1
+for corner in [(left, top), (right, top), (left, bottom), (right, bottom)]:
     Quartz.CGWarpMouseCursorPosition(corner)
     for name, call in {
         "click": lambda: server.click(700, 500),
@@ -71,6 +74,16 @@ for corner in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
             pass
 Quartz.CGWarpMouseCursorPosition(original)
 print("fail-safe: all four corners abort")
+
+server.move(width // 2, height // 2)
+local_x, local_y = server._mouse_position()
+global_x, global_y = server._mouse_global()
+scale = server._points_per_pixel()
+assert abs(local_x - width // 2) <= 1 and abs(local_y - height // 2) <= 1, (local_x, local_y)
+assert abs(global_x - (left + width // 2 * scale)) <= 1, (global_x, left, scale)
+Quartz.CGWarpMouseCursorPosition(original)
+print(f"coordinates: {int(bounds.size.width)}x{int(bounds.size.height)} pt display, {scale:.3f} pt per "
+      f"screenshot pixel; move({width // 2}, {height // 2}) lands at ({global_x:.0f}, {global_y:.0f}) pt")
 
 start = time.perf_counter()
 server.wait(0.5)
@@ -104,7 +117,7 @@ source = Quartz.CGImageSourceCreateWithData(zoomed.data, None)
 zoomed_image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None)
 _, scale = server._capture_native()
 zoom_size = (Quartz.CGImageGetWidth(zoomed_image), Quartz.CGImageGetHeight(zoomed_image))
-assert zoom_size == (300 * scale, 200 * scale), zoom_size
+assert abs(zoom_size[0] - 300 * scale) <= 2 and abs(zoom_size[1] - 200 * scale) <= 2, (zoom_size, scale)
 print(f"zoom: 300x200 region -> {zoom_size[0]}x{zoom_size[1]} px")
 
 previous_app = server._frontmost_app()
