@@ -85,9 +85,19 @@ assert {"time", "pid", "app"} <= last.keys(), last
 print(f"wait: {waited:.1f} s; log: {len(aborted)} aborted calls and the wait in {server._log_path()}")
 
 tools = {tool.name: tool.inputSchema for tool in asyncio.run(server.mcp.list_tools())}
-assert set(tools["click"]["properties"]) == {"x", "y", "button", "clicks"}, tools["click"]
+assert set(tools["click"]["properties"]) == {"x", "y", "button", "clicks", "modifiers"}, tools["click"]
 assert tools["wait"]["required"] == ["seconds"], tools["wait"]
 print(f"schema: {len(tools)} tools, logged wrappers keep their parameters")
+
+displays = server.list_displays()
+assert displays.startswith("0: ") and "main, selected" in displays.splitlines()[0], displays
+server.use_display(0)
+try:
+    server.use_display(len(displays.splitlines()))
+    raise AssertionError("use_display accepted a missing display")
+except ValueError:
+    pass
+print(f"displays: {len(displays.splitlines())} ({displays.splitlines()[0]})")
 
 zoomed = server.zoom(100, 100, 300, 200)
 source = Quartz.CGImageSourceCreateWithData(zoomed.data, None)

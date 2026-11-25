@@ -18,6 +18,9 @@ sandbox and no undo. Act like a careful human operator.
   recalling; filter by `time` or `pid` rather than reading a whole long day.
 - **Coordinates are image pixels.** Click the centre of the target as it appears in the latest
   screenshot. Never reuse coordinates from an older screenshot after the layout changed.
+- **Several displays.** Tools work on one selected display (the main one at start). If the app is
+  not on it, call `list_displays`, then `use_display(index)`; coordinates are then relative to that
+  display. `find_text` on each display finds which one holds a window.
 - **Bring the app to the front first.** Another window (the terminal) may hold focus. Call
   `activate_app("Windows App")` (any app name or bundle id), then check the screenshot shows it in front.
 - **Read, don't guess.** For values (amounts, dates, account numbers) call `find_text` with a `region`
@@ -40,6 +43,8 @@ sandbox and no undo. Act like a careful human operator.
 ## Keyboard
 
 - `type_text` types into the focused field. Click the field first.
+- `click(..., modifiers="shift")` extends a selection; `"cmd"` adds to it on macOS, `"ctrl"` inside
+  Windows / RDP.
 - To replace a field's text: click at its end, `key("shift+home")`, then `type_text`. `ctrl+a`
   does not select all in every app (SAP Business One ignores it).
 - `key` takes `+`-joined combos: `cmd+tab`, `cmd+space`, `shift+home`, `ctrl+alt+delete`, `enter`,

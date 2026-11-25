@@ -32,11 +32,12 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 
 | Tool | What it does |
 |---|---|
-| `screenshot` | Screenshot of the main display; image pixels equal click coordinates |
+| `screenshot` | Screenshot of the selected display; image pixels equal click coordinates |
 | `zoom` | A region at native (2×) resolution, to read small text and digits |
 | `find_text` | OCR (macOS Vision): text lines with click points; find a label and click it, read exact numbers |
 | `activate_app` | Bring an app to the front by name or bundle id, launching it if needed |
-| `click` | Left, right or middle click; `clicks=2` for a double click |
+| `click` | Left, right or middle click; `clicks=2` for a double click; `modifiers="shift"` / `"cmd"` / `"ctrl"` held during it |
+| `list_displays` / `use_display` | The connected displays; pick the one all other tools work on |
 | `move` | Move the mouse (hover) |
 | `drag` | Drag with the left button |
 | `scroll` | Scroll by wheel ticks |
@@ -79,7 +80,7 @@ The server runs as a child of your terminal, so macOS asks about the terminal ap
 
 ## Safety
 
-- **Fail-safe.** Before every action, and before every typed character, Deckchair checks the mouse. In a screen corner it refuses with `ABORTED BY USER`, and the agent stops and asks. Hold the mouse there until the agent stops.
+- **Fail-safe.** Before every action, and before every typed character, Deckchair checks the mouse. In a corner of any display it refuses with `ABORTED BY USER`, and the agent stops and asks. Hold the mouse there until the agent stops.
 - **One process.** The first tool call takes a lock (`$TMPDIR/deckchair.lock`, holding the PID). Another session gets an error naming that PID. The lock goes away when the session exits.
 - **Action log.** Every acting call (click, type, key, scroll, drag, app switch, wait, files, recording) is appended to `~/.deckchair/actions-YYYY-MM-DD.jsonl`, one JSON line per call and one file per day: time, process, tool, arguments, front app, result or error. Appending costs ~50 µs whatever the file size. Typed text is in the log. Looking (`screenshot`, `zoom`, `find_text`) is not logged.
 - **No per-app approval.** Unlike built-in computer use, Deckchair does not ask before touching an app. Approve its tools per call, not "always", until you trust the workflow.
@@ -92,7 +93,7 @@ Deckchair sends real key codes, left/right modifier bits and HID-state events, s
 
 | Works in RDP | Limits |
 |---|---|
-| Clicks, menus, drop-downs, scroll | Main display only |
+| Clicks, menus, drop-downs, scroll | |
 | OCR of English, Ukrainian, Russian and digits | OCR can't read Hebrew (Vision has no Hebrew model) |
 | Text with capitals and symbols | Non-ASCII text takes ~2 s per `type_text` call |
 | Cyrillic and other non-ASCII text, through the clipboard | The window flicks to Finder and back once per paste |

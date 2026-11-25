@@ -42,6 +42,7 @@ OCR_LANGUAGES = ["en-US", "uk-UA", "ru-RU"]
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 LOG_DIR = Path.home() / ".deckchair"
 held_lock = []
+selected_display = [Quartz.CGMainDisplayID()]
 
 # RDP/VM clients read modifier state from the HID system state; events without this source don't update it
 EVENT_SOURCE = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
@@ -87,14 +88,34 @@ class AbortedByUser(Exception):
     pass
 
 
+def _displays() -> list[int]:
+    """Active display IDs, the main display first: the index is what list_displays / use_display show."""
+    error, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
+    main = Quartz.CGMainDisplayID()
+    return [main] + [display for display in ids[:count] if display != main]
+
+
+def _display_bounds():
+    """Bounds of the selected display in global points. All tool coordinates are relative to its top-left."""
+    if selected_display[0] not in _displays():
+        selected_display[0] = Quartz.CGMainDisplayID()
+    return Quartz.CGDisplayBounds(selected_display[0])
+
+
 def _screen_size() -> tuple[int, int]:
-    bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    bounds = _display_bounds()
     return int(bounds.size.width), int(bounds.size.height)
 
 
-def _mouse_position() -> tuple[float, float]:
+def _mouse_global() -> tuple[float, float]:
     location = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
     return location.x, location.y
+
+
+def _mouse_position() -> tuple[float, float]:
+    x, y = _mouse_global()
+    bounds = _display_bounds()
+    return x - bounds.origin.x, y - bounds.origin.y
 
 
 def _acquire_lock() -> None:
@@ -123,11 +144,16 @@ def _acquire_lock() -> None:
 
 def _check_abort() -> None:
     _acquire_lock()
-    x, y = _mouse_position()
-    width, height = _screen_size()
-    at_x_edge = x <= CORNER_TOLERANCE or x >= width - 1 - CORNER_TOLERANCE
-    at_y_edge = y <= CORNER_TOLERANCE or y >= height - 1 - CORNER_TOLERANCE
-    if at_x_edge and at_y_edge:
+    x, y = _mouse_global()
+    for display in _displays():
+        bounds = Quartz.CGDisplayBounds(display)
+        left, top = bounds.origin.x, bounds.origin.y
+        right, bottom = left + bounds.size.width - 1, top + bounds.size.height - 1
+        inside = left - CORNER_TOLERANCE <= x <= right + CORNER_TOLERANCE and top - CORNER_TOLERANCE <= y <= bottom + CORNER_TOLERANCE
+        at_x_edge = x <= left + CORNER_TOLERANCE or x >= right - CORNER_TOLERANCE
+        at_y_edge = y <= top + CORNER_TOLERANCE or y >= bottom - CORNER_TOLERANCE
+        if not (inside and at_x_edge and at_y_edge):
+            continue
         raise AbortedByUser(
             "ABORTED BY USER: the mouse is in a screen corner. Stop all desktop actions and ask the user how to proceed."
         )
@@ -169,8 +195,8 @@ def _logged(tool):
 
 
 def _capture_native():
-    """The main display at native resolution (2x on Retina) and its scale: native pixels per screen point."""
-    bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+    """The selected display at native resolution (2x on Retina) and its scale: native pixels per screen point."""
+    bounds = _display_bounds()
     # ponytail: deprecated CGWindowListCreateImage (~25 ms). It stalls 30 s while another process of the same Python
     # binary has captured the screen; the lock prevents that between Deckchair processes. Move to ScreenCaptureKit
     # if a macOS release removes the API, or fall back to the screencapture CLI (~160 ms).
@@ -213,9 +239,13 @@ def _after_action() -> Image:
     return screenshot()
 
 
-def _post_mouse(event_type: int, x: float, y: float, button: int, click_state: int = 1) -> None:
-    event = Quartz.CGEventCreateMouseEvent(EVENT_SOURCE, event_type, (x, y), button)
+def _post_mouse(event_type: int, x: float, y: float, button: int, click_state: int = 1, flags: int = 0) -> None:
+    bounds = _display_bounds()
+    point = (bounds.origin.x + x, bounds.origin.y + y)
+    event = Quartz.CGEventCreateMouseEvent(EVENT_SOURCE, event_type, point, button)
     Quartz.CGEventSetIntegerValueField(event, Quartz.kCGMouseEventClickState, click_state)
+    if flags:
+        Quartz.CGEventSetFlags(event, flags)
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
@@ -272,7 +302,8 @@ def _char_key(char: str) -> tuple[int, bool] | None:
 
 @mcp.tool()
 def screenshot() -> Image:
-    """Screenshot of the main display. Image pixel coordinates equal click coordinates.
+    """Screenshot of the selected display (the main one unless `use_display` chose another). Image pixel
+    coordinates equal click coordinates.
     Every action tool already returns a screenshot taken after the action; call this only to look without acting."""
     _acquire_lock()
     return Image(data=_capture_jpeg(), format="jpeg")
@@ -348,15 +379,25 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
 
 @mcp.tool()
 @_logged
-def click(x: int, y: int, button: str = "left", clicks: int = 1) -> Image:
-    """Click at (x, y). button: left | right | middle. clicks=2 for double click."""
+def click(x: int, y: int, button: str = "left", clicks: int = 1, modifiers: str = "") -> Image:
+    """Click at (x, y). button: left | right | middle. clicks=2 for double click.
+    modifiers: keys held during the click, '+'-joined: 'shift' (extend a selection), 'cmd' (add to a selection on
+    macOS), 'ctrl' (the same in Windows / RDP), 'alt', 'cmd+shift'."""
     _check_abort()
     down, up, button_code = MOUSE_BUTTONS[button]
+    held = [MODIFIERS[name] for name in modifiers.lower().split("+") if name]
     _move_to(x, y)
+    flags = 0
+    for modifier_keycode, flag in held:
+        flags |= flag
+        _post_key(modifier_keycode, True, flags)
     for click_state in range(1, clicks + 1):
-        _post_mouse(down, x, y, button_code, click_state)
-        _post_mouse(up, x, y, button_code, click_state)
+        _post_mouse(down, x, y, button_code, click_state, flags)
+        _post_mouse(up, x, y, button_code, click_state, flags)
         time.sleep(0.05)
+    for modifier_keycode, flag in reversed(held):
+        flags &= ~flag
+        _post_key(modifier_keycode, False, flags)
     return _after_action()
 
 
@@ -508,13 +549,51 @@ def _output_path(path: str, suffixes: tuple[str, ...]) -> Path:
 @mcp.tool()
 @_logged
 def save_screenshot(path: str) -> str:
-    """Save a full-resolution screenshot of the main display to a file (.png or .jpg) and return its path.
+    """Save a full-resolution screenshot of the selected display to a file (.png or .jpg) and return its path.
     Use it to keep evidence for the user; use `screenshot` to look at the screen yourself."""
     _acquire_lock()
     target = _output_path(path, (".png", ".jpg", ".jpeg"))
     image_format = "png" if target.suffix.lower() == ".png" else "jpg"
-    subprocess.run(["screencapture", "-x", "-m", "-t", image_format, str(target)], check=True, timeout=15)
+    command = ["screencapture", "-x", "-D", _screencapture_display(), "-t", image_format, str(target)]
+    subprocess.run(command, check=True, timeout=15)
     return str(target)
+
+
+def _screencapture_display() -> str:
+    # ponytail: screencapture numbers displays from 1 = main; the order of the others is assumed to match
+    # CGGetActiveDisplayList, not verified with a second display
+    _display_bounds()
+    return str(_displays().index(selected_display[0]) + 1)
+
+
+@mcp.tool()
+def list_displays() -> str:
+    """The connected displays: index, size in points, position, which is main and which is selected. All tool
+    coordinates are relative to the selected display; switch with `use_display`."""
+    _display_bounds()
+    lines = []
+    for index, display in enumerate(_displays()):
+        bounds = Quartz.CGDisplayBounds(display)
+        notes = ["main"] if display == Quartz.CGMainDisplayID() else []
+        notes += ["selected"] if display == selected_display[0] else []
+        lines.append(
+            f"{index}: {int(bounds.size.width)}x{int(bounds.size.height)} at "
+            f"({int(bounds.origin.x)}, {int(bounds.origin.y)}){' — ' + ', '.join(notes) if notes else ''}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@_logged
+def use_display(index: int) -> Image:
+    """Select the display that screenshots, clicks, OCR, zoom, files and recordings work on, by its index in
+    `list_displays` (0 = main). Coordinates are then relative to that display. Returns its screenshot."""
+    _acquire_lock()
+    displays = _displays()
+    if not 0 <= index < len(displays):
+        raise ValueError(f"No display {index}; connected: 0..{len(displays) - 1}")
+    selected_display[0] = displays[index]
+    return screenshot()
 
 
 recording = {}
@@ -583,9 +662,10 @@ def start_recording(path: str, region: list[int] | None = None) -> str:
     command = ["screencapture", "-v", "-x", "-k"]
     if region:
         x, y, width, height = region
-        command += ["-R", f"{x},{y},{width},{height}"]
+        bounds = _display_bounds()
+        command += ["-R", f"{int(bounds.origin.x + x)},{int(bounds.origin.y + y)},{width},{height}"]
     else:
-        command.append("-m")
+        command += ["-D", _screencapture_display()]
     process = subprocess.Popen(
         command + [str(raw)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )

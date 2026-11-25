@@ -45,7 +45,10 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   while another live process of the same Python binary has captured the screen. The lock prevents it
   between Deckchair processes. `screencapture` (the CLI) is not affected; files use it.
 - **Coordinates.** Screenshots are scaled to the display size in points, so image pixels equal
-  `CGEvent` coordinates on Retina.
+  coordinates on Retina. Tool coordinates are relative to the selected display: `_post_mouse` adds its
+  origin (a display left of the main one has a negative x); `_mouse_position` subtracts it.
+- **Displays.** `_displays()` puts the main display first; `screencapture -D` numbers them the same way
+  (checked with a 5K main display and the built-in one). The fail-safe checks the corners of every display.
 - **Scroll in RDP.** One `kCGScrollEventUnitLine` event per wheel tick from `EVENT_SOURCE`: 10 ticks
   move an RDP grid ~160 px. pyautogui's scroll moved it ~16 px.
 - **Video frames.** `screencapture -v` writes a frame only when the screen changes (variable rate,
