@@ -1,9 +1,12 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz"]
+# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision"]
 # ///
 import atexit
 import fcntl
+import functools
+import inspect
+import json
 import math
 import os
 import shutil
@@ -11,11 +14,13 @@ import signal
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import AppKit
 import Foundation
 import Quartz
+import Vision
 from mcp.server.fastmcp import FastMCP, Image
 
 mcp = FastMCP("deckchair")
@@ -32,7 +37,10 @@ CORNER_TOLERANCE = 1
 # ponytail: Windows App / Microsoft Remote Desktop only; add the bundle IDs of other RDP / VNC clients here
 RDP_APPS = {"com.microsoft.rdc.macos"}
 CLIPBOARD_SYNC_SECONDS = 1.0
+# Vision OCR on this Mac has no Hebrew: Hebrew labels are not read, digits next to them are
+OCR_LANGUAGES = ["en-US", "uk-UA", "ru-RU"]
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
+LOG_DIR = Path.home() / ".deckchair"
 held_lock = []
 
 # RDP/VM clients read modifier state from the HID system state; events without this source don't update it
@@ -125,8 +133,43 @@ def _check_abort() -> None:
         )
 
 
-def _capture_jpeg() -> bytes:
-    width, height = _screen_size()
+def _log_path(day: datetime | None = None) -> Path:
+    """One JSONL file per local day: "what did you do today" reads one small file, old days go as whole files."""
+    return LOG_DIR / f"actions-{(day or datetime.now()).strftime('%Y-%m-%d')}.jsonl"
+
+
+def _logged(tool):
+    """Append every call of an acting tool to the day's log (JSONL): time, tool, arguments, front app, result or
+    error. Typed text is logged too: it is the audit trail of what the agent did, e.g. in an ERP."""
+    signature = inspect.signature(tool)
+
+    @functools.wraps(tool)
+    def wrapper(*args, **kwargs):
+        started = datetime.now().astimezone()
+        entry = {
+            "time": started.isoformat(timespec="milliseconds"),
+            "pid": os.getpid(),
+            "tool": tool.__name__,
+            "args": dict(signature.bind(*args, **kwargs).arguments),
+            "app": _frontmost_app(),
+        }
+        try:
+            result = tool(*args, **kwargs)
+            entry["result"] = result if isinstance(result, str) else "ok"
+            return result
+        except Exception as error:
+            entry["error"] = str(error)
+            raise
+        finally:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with _log_path(started).open("a", encoding="utf-8") as log:
+                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    return wrapper
+
+
+def _capture_native():
+    """The main display at native resolution (2x on Retina) and its scale: native pixels per screen point."""
     bounds = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
     # ponytail: deprecated CGWindowListCreateImage (~25 ms). It stalls 30 s while another process of the same Python
     # binary has captured the screen; the lock prevents that between Deckchair processes. Move to ScreenCaptureKit
@@ -136,19 +179,32 @@ def _capture_jpeg() -> bytes:
     )
     if image is None:
         raise RuntimeError("Screen capture failed: grant Screen Recording to the terminal app and restart it.")
+    return image, Quartz.CGImageGetWidth(image) / bounds.size.width
+
+
+def _crop(image, scale: float, region: list[int]):
+    x, y, width, height = region
+    return Quartz.CGImageCreateWithImageInRect(image, Quartz.CGRectMake(x * scale, y * scale, width * scale, height * scale))
+
+
+def _encode_image(image, uti: str, properties: dict | None = None) -> bytes:
+    data = Foundation.NSMutableData.data()
+    destination = Quartz.CGImageDestinationCreateWithData(data, uti, 1, None)
+    Quartz.CGImageDestinationAddImage(destination, image, properties)
+    Quartz.CGImageDestinationFinalize(destination)
+    return bytes(data)
+
+
+def _capture_jpeg() -> bytes:
+    width, height = _screen_size()
+    image, scale = _capture_native()
     context = Quartz.CGBitmapContextCreate(
         None, width, height, 8, 0, Quartz.CGColorSpaceCreateDeviceRGB(), Quartz.kCGImageAlphaNoneSkipLast
     )
     Quartz.CGContextSetInterpolationQuality(context, Quartz.kCGInterpolationHigh)
     Quartz.CGContextDrawImage(context, Quartz.CGRectMake(0, 0, width, height), image)
     scaled = Quartz.CGBitmapContextCreateImage(context)
-    data = Foundation.NSMutableData.data()
-    destination = Quartz.CGImageDestinationCreateWithData(data, "public.jpeg", 1, None)
-    Quartz.CGImageDestinationAddImage(
-        destination, scaled, {Quartz.kCGImageDestinationLossyCompressionQuality: 0.7}
-    )
-    Quartz.CGImageDestinationFinalize(destination)
-    return bytes(data)
+    return _encode_image(scaled, "public.jpeg", {Quartz.kCGImageDestinationLossyCompressionQuality: 0.7})
 
 
 def _after_action() -> Image:
@@ -223,6 +279,75 @@ def screenshot() -> Image:
 
 
 @mcp.tool()
+@_logged
+def activate_app(name: str) -> Image:
+    """Bring an app to the front, launching it if needed: by name ('Windows App', 'Sublime Text') or bundle id
+    ('com.microsoft.rdc.macos'). Use it instead of clicking the Dock, e.g. after the terminal took focus."""
+    _check_abort()
+    flag = "-b" if "." in name and " " not in name else "-a"
+    result = subprocess.run(["open", flag, name], capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise RuntimeError(f"Cannot open {name!r}: {result.stderr.strip()}")
+    return _after_action()
+
+
+@mcp.tool()
+def zoom(x: int, y: int, width: int, height: int) -> Image:
+    """Look closely at part of the screen: the region [x, y, width, height] (screenshot coordinates) at native
+    resolution, 2x on Retina, sharp enough to read small text and digits. Pixels of this image are not click
+    coordinates: a point (px, py) in it is (x + px / 2, y + py / 2) on screen on Retina."""
+    _acquire_lock()
+    image, scale = _capture_native()
+    return Image(data=_encode_image(_crop(image, scale, [x, y, width, height]), "public.png"), format="png")
+
+
+@mcp.tool()
+def find_text(text: str | None = None, region: list[int] | None = None) -> str:
+    """Read the text on screen with macOS OCR (Vision): every text line with its click point and box, in screenshot
+    coordinates, top to bottom. With `text`, only lines that contain it (case-insensitive), and the point is the
+    centre of the match itself: click it to press a button or menu item by its label. region: [x, y, width, height]
+    to read only part of the screen. Use it to read exact numbers instead of guessing them from a screenshot."""
+    _acquire_lock()
+    image, scale = _capture_native()
+    origin_x, origin_y = 0, 0
+    width, height = _screen_size()
+    if region:
+        origin_x, origin_y, width, height = region
+        image = _crop(image, scale, region)
+    request = Vision.VNRecognizeTextRequest.alloc().init()
+    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    request.setUsesLanguageCorrection_(False)
+    request.setRecognitionLanguages_(OCR_LANGUAGES)
+    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
+    success, error = handler.performRequests_error_([request], None)
+    if not success:
+        raise RuntimeError(f"OCR failed: {error}")
+    needle = text.lower() if text else None
+    found = []
+    for observation in request.results() or []:
+        candidate = observation.topCandidates_(1)[0]
+        line = candidate.string()
+        box = observation.boundingBox()
+        if needle:
+            start = line.lower().find(needle)
+            if start < 0:
+                continue
+            match, error = candidate.boundingBoxForRange_error_(Foundation.NSMakeRange(start, len(needle)), None)
+            if match is not None:
+                box = match.boundingBox()
+        # Vision boxes are normalised with the origin at the bottom left
+        box_x = round(origin_x + box.origin.x * width)
+        box_y = round(origin_y + (1 - box.origin.y - box.size.height) * height)
+        box_width, box_height = round(box.size.width * width), round(box.size.height * height)
+        found.append((box_y, box_x, f"{line!r} at ({box_x + box_width // 2}, {box_y + box_height // 2}) "
+                                    f"box [{box_x}, {box_y}, {box_width}, {box_height}]"))
+    if not found:
+        return f"No text matching {text!r} on screen." if text else "No text on screen."
+    return "\n".join(entry for box_y, box_x, entry in sorted(found))
+
+
+@mcp.tool()
+@_logged
 def click(x: int, y: int, button: str = "left", clicks: int = 1) -> Image:
     """Click at (x, y). button: left | right | middle. clicks=2 for double click."""
     _check_abort()
@@ -236,6 +361,7 @@ def click(x: int, y: int, button: str = "left", clicks: int = 1) -> Image:
 
 
 @mcp.tool()
+@_logged
 def move(x: int, y: int) -> Image:
     """Move the mouse to (x, y) without clicking (hover)."""
     _check_abort()
@@ -244,6 +370,7 @@ def move(x: int, y: int) -> Image:
 
 
 @mcp.tool()
+@_logged
 def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> Image:
     """Drag with the left button from one point to another."""
     _check_abort()
@@ -260,6 +387,7 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> Image:
 
 
 @mcp.tool()
+@_logged
 def scroll(x: int, y: int, amount: int) -> Image:
     """Scroll at (x, y) by `amount` wheel ticks. Positive scrolls up, negative scrolls down."""
     _check_abort()
@@ -273,6 +401,7 @@ def scroll(x: int, y: int, amount: int) -> Image:
 
 
 @mcp.tool()
+@_logged
 def type_text(text: str) -> Image:
     """Type text into the focused field. Any text, Cyrillic included. Inside an RDP client non-ASCII text is
     pasted through the clipboard (ctrl+v on the remote side); the user's clipboard is restored afterwards."""
@@ -296,6 +425,9 @@ def type_text(text: str) -> Image:
 
 
 def _frontmost_app() -> str | None:
+    # NSWorkspace updates frontmostApplication from run-loop notifications, and this server has no run loop:
+    # without a short spin it keeps returning the app that was in front at the first call
+    Foundation.NSRunLoop.currentRunLoop().runUntilDate_(Foundation.NSDate.dateWithTimeIntervalSinceNow_(0.01))
     return AppKit.NSWorkspace.sharedWorkspace().frontmostApplication().bundleIdentifier()
 
 
@@ -326,7 +458,7 @@ def _paste_in_rdp(text: str) -> None:
     board.setString_forType_(text, AppKit.NSPasteboardTypeString)
     # Windows App sends a clipboard change to the remote side only when it becomes the active app, not when the
     # clipboard changes: switch to Finder and back. The caret in the remote field stays where it was.
-    rdp_app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    rdp_app = _running_app(_frontmost_app())
     for app in [_running_app("com.apple.finder"), rdp_app]:
         app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
         time.sleep(0.3)
@@ -341,6 +473,7 @@ def _running_app(bundle_id: str):
 
 
 @mcp.tool()
+@_logged
 def key(keys: str) -> Image:
     """Press a key or combo, e.g. 'enter', 'tab', 'esc', 'cmd+tab', 'cmd+space', 'shift+home', 'ctrl+alt+delete'."""
     _check_abort()
@@ -353,6 +486,17 @@ def key(keys: str) -> Image:
     return _after_action()
 
 
+@mcp.tool()
+@_logged
+def wait(seconds: float) -> Image:
+    """Wait without acting (a report loading, RDP redrawing, holding the final state for a video), then return a
+    screenshot. Up to 30 s."""
+    _check_abort()
+    time.sleep(min(max(seconds, 0), 30))
+    _check_abort()
+    return screenshot()
+
+
 def _output_path(path: str, suffixes: tuple[str, ...]) -> Path:
     target = Path(path).expanduser().resolve()
     if target.suffix.lower() not in suffixes:
@@ -362,6 +506,7 @@ def _output_path(path: str, suffixes: tuple[str, ...]) -> Path:
 
 
 @mcp.tool()
+@_logged
 def save_screenshot(path: str) -> str:
     """Save a full-resolution screenshot of the main display to a file (.png or .jpg) and return its path.
     Use it to keep evidence for the user; use `screenshot` to look at the screen yourself."""
@@ -390,7 +535,7 @@ def _video_seconds(path: Path) -> float:
     return float(probe.stdout.strip())
 
 
-def _encode(raw: Path, target: Path) -> None:
+def _encode_video(raw: Path, target: Path) -> None:
     # Constant 15 fps first (screencapture writes frames only on change), then mpdecimate with max=2 keeps
     # every third frame of a still screen: pauses play 3x faster, motion stays real-time, a toast still shows.
     video_filter = (
@@ -425,6 +570,7 @@ def _contact_sheet(video: Path, seconds: float) -> tuple[Path, float]:
 
 
 @mcp.tool()
+@_logged
 def start_recording(path: str, region: list[int] | None = None) -> str:
     """Start recording the screen to an .mp4 file, with mouse clicks shown. Stop it with `stop_recording`.
     region: optional [x, y, width, height] in screenshot coordinates, e.g. only the RDP window.
@@ -451,6 +597,7 @@ def start_recording(path: str, region: list[int] | None = None) -> str:
 
 
 @mcp.tool()
+@_logged
 def stop_recording() -> str:
     """Stop the recording and encode it: duplicate still frames cut (pauses play faster), H.264, at most
     1280 px wide. Returns the video path, duration, size and a contact sheet (up to 8x8 tiles) to check every
@@ -465,7 +612,7 @@ def stop_recording() -> str:
         raise RuntimeError(f"Recording stopped but no file was written: {raw}")
     if not (_video_tool("ffmpeg") and _video_tool("ffprobe")):
         return f"ffmpeg not found (brew install ffmpeg); raw recording kept: {raw}"
-    _encode(raw, target)
+    _encode_video(raw, target)
     raw.unlink()
     seconds = _video_seconds(target)
     sheet, tile_seconds = _contact_sheet(target, seconds)

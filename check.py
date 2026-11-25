@@ -1,7 +1,9 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz"]
+# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision"]
 # ///
+import asyncio
+import json
 import string
 import subprocess
 import sys
@@ -46,6 +48,13 @@ size = (Quartz.CGImageGetWidth(image), Quartz.CGImageGetHeight(image))
 assert size == server._screen_size(), (size, server._screen_size())
 print(f"screenshot {size[0]}x{size[1]}, {len(jpeg) // 1024} KB, {elapsed_ms:.0f} ms")
 
+def log_entries() -> list[dict]:
+    if not server._log_path().exists():
+        return []
+    return [json.loads(line) for line in server._log_path().read_text(encoding="utf-8").splitlines()]
+
+
+log_start = len(log_entries())
 original = server._mouse_position()
 width, height = server._screen_size()
 for corner in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]:
@@ -62,6 +71,47 @@ for corner in [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
             pass
 Quartz.CGWarpMouseCursorPosition(original)
 print("fail-safe: all four corners abort")
+
+start = time.perf_counter()
+server.wait(0.5)
+waited = time.perf_counter() - start
+assert waited >= 0.5, waited
+new_entries = log_entries()[log_start:]
+aborted = [entry for entry in new_entries if "ABORTED BY USER" in entry.get("error", "")]
+assert len(aborted) == 12, len(aborted)
+last = new_entries[-1]
+assert last["tool"] == "wait" and last["args"] == {"seconds": 0.5} and last["result"] == "ok", last
+assert {"time", "pid", "app"} <= last.keys(), last
+print(f"wait: {waited:.1f} s; log: {len(aborted)} aborted calls and the wait in {server._log_path()}")
+
+tools = {tool.name: tool.inputSchema for tool in asyncio.run(server.mcp.list_tools())}
+assert set(tools["click"]["properties"]) == {"x", "y", "button", "clicks"}, tools["click"]
+assert tools["wait"]["required"] == ["seconds"], tools["wait"]
+print(f"schema: {len(tools)} tools, logged wrappers keep their parameters")
+
+zoomed = server.zoom(100, 100, 300, 200)
+source = Quartz.CGImageSourceCreateWithData(zoomed.data, None)
+zoomed_image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None)
+_, scale = server._capture_native()
+zoom_size = (Quartz.CGImageGetWidth(zoomed_image), Quartz.CGImageGetHeight(zoomed_image))
+assert zoom_size == (300 * scale, 200 * scale), zoom_size
+print(f"zoom: 300x200 region -> {zoom_size[0]}x{zoom_size[1]} px")
+
+previous_app = server._frontmost_app()
+server.activate_app("Finder")
+assert server._frontmost_app() == "com.apple.finder", server._frontmost_app()
+start = time.perf_counter()
+menu = server.find_text("Finder", region=[0, 0, width, 40])
+ocr_ms = (time.perf_counter() - start) * 1000
+assert "at (" in menu, menu
+menu_y = int(menu.split("at (")[1].split(",")[1].split(")")[0])
+assert menu_y < 40, menu
+everything = server.find_text()
+assert everything.count("\n") >= 5, everything
+server.activate_app(previous_app)
+assert server._frontmost_app() == previous_app, server._frontmost_app()
+print(f"activate_app: Finder and back; find_text: menu title found in {ocr_ms:.0f} ms, "
+      f"{everything.count(chr(10)) + 1} lines on the full screen")
 
 with tempfile.TemporaryDirectory() as folder:
     shot = Path(server.save_screenshot(f"{folder}/shots/screen.png"))

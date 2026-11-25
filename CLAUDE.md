@@ -11,8 +11,8 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 
 ## Rules
 
-- One file, two dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP) and `pyobjc-framework-Quartz`,
-  declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
+- One file, three dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP), `pyobjc-framework-Quartz` and
+  `pyobjc-framework-Vision`, declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
   Video encoding calls the `ffmpeg` / `ffprobe` binaries when present; everything else works without them.
 - After every change run `uv run --script check.py`. It takes the lock: stop a session that uses
   Deckchair first. Then the user reconnects the server in `/mcp`; a newly added server needs a new session.
@@ -20,6 +20,8 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   `skills/deckchair/SKILL.md` in the same commit.
 - Every action tool calls `_check_abort()` first (fail-safe + lock) and returns `_after_action()`.
   `type_text` checks before each character.
+- Every tool that acts gets `@_logged` under `@mcp.tool()` (the action log). Tools that only look
+  (`screenshot`, `zoom`, `find_text`) don't. `check.py` writes its own calls to the real log too.
 
 ## Gotchas (each one cost a debugging round)
 
@@ -32,6 +34,11 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   the Finder-and-back switch every paste repeats the first text, even 2 s later. The remote fetches the
   data on paste, asynchronously: restore the clipboard 1 s after `ctrl+v`, and use one paste per call
   (several quick pastes arrive out of order).
+- **Front app is stale without a run loop.** `NSWorkspace.frontmostApplication()` keeps returning the
+  app that was in front at the first call: `_frontmost_app()` spins the run loop 10 ms first.
+- **Vision.** `VNImageRequestHandler.initWithCGImage_options_` needs `None`, not `{}` ("key does not
+  exist"). No Hebrew model (`supportedRecognitionLanguagesAndReturnError_` lists the languages). The very
+  first OCR call on a Mac took 34 s; later calls take 90–230 ms.
 - **pyautogui-style modifiers fail.** A modifier key-down without flags on the event never reaches
   `cmd+tab` / `cmd+space`.
 - **Screenshot stall.** `CGWindowListCreateImage` waits 30 s (and `CGDisplayCreateImage` fails after 5 s)
@@ -46,4 +53,4 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   Never drop `max=2` from `mpdecimate`: without it still frames vanish and toasts only flash. The video
   rules come from the `browser-qa` skill (`~/.claude/skills/browser-qa/SKILL.md`, section 6).
 - **Focus.** A terminal multiplexer (Herdr) can take focus after file edits; the agent re-activates
-  the target app (Dock click) before acting.
+  the target app with `activate_app` before acting.

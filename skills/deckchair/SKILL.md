@@ -11,12 +11,21 @@ sandbox and no undo. Act like a careful human operator.
 ## Rules for agents
 
 - **Look first.** Start with `screenshot`. Every action tool returns a screenshot taken 0.4 s after
-  the action; read it before the next step. Call `screenshot` again only to wait for something slow
-  (an animation, a report loading, RDP lag).
+  the action; read it before the next step. For something slow (a report loading, RDP lag) call
+  `wait(seconds)`: it returns a screenshot after the wait.
+- **Everything you do is logged.** Acting calls go to `~/.deckchair/actions-YYYY-MM-DD.jsonl` (one
+  file per day) with their arguments. When the user asks what you did, read that day's file instead of
+  recalling; filter by `time` or `pid` rather than reading a whole long day.
 - **Coordinates are image pixels.** Click the centre of the target as it appears in the latest
   screenshot. Never reuse coordinates from an older screenshot after the layout changed.
-- **Bring the app to the front first.** Another window (the terminal) may hold focus. Click the app's
-  Dock icon, then check the screenshot shows it in front.
+- **Bring the app to the front first.** Another window (the terminal) may hold focus. Call
+  `activate_app("Windows App")` (any app name or bundle id), then check the screenshot shows it in front.
+- **Read, don't guess.** For values (amounts, dates, account numbers) call `find_text` with a `region`
+  around them and quote its text. For small text you only need to look at, use `zoom`.
+- **Click by label.** `find_text("Trial Balance")` returns the click point of the match itself; prefer it
+  to estimating coordinates from a screenshot. OCR reads English, Ukrainian, Russian and digits, not Hebrew.
+- **Zoom pixels are not click points.** In a `zoom` image a point (px, py) is (x + px / 2, y + py / 2) on
+  screen on Retina.
 - **Stop on abort.** An error with `ABORTED BY USER` means the user pushed the mouse into a corner.
   Stop all desktop actions at once, take no screenshot, and ask the user how to proceed.
 - **Lock error.** "Deckchair is already in use by another process" means another session drives the
@@ -25,8 +34,8 @@ sandbox and no undo. Act like a careful human operator.
 - **Confirm before irreversible actions.** Before Save / Add / Post / Send / Delete / Approve, or any
   button that changes data, tell the user exactly what you will do and wait for a yes. Reading,
   opening reports and navigating need no confirmation.
-- **Say what you saw.** Report values as read from the screen; if text is too small to read, take a
-  `save_screenshot` and look at the full-resolution file, or zoom the app, instead of guessing.
+- **Say what you saw.** Report values as `find_text` or `zoom` showed them; never fill in a value you
+  could not read.
 
 ## Keyboard
 
@@ -69,7 +78,7 @@ the screen never shows (a DB field, an API response) needs neither: say so and n
 - While recording, the mouse glides to each target and pauses 0.7 s before and after the action, so a
   viewer can follow. Don't add your own waits for that; wait only for slow loads, 1–3 s.
 - Re-check coordinates in the returned screenshot before each click: dialogs and toasts shift layouts.
-- Hold the final state ~2 s before `stop_recording`, so the result stays on screen.
+- Hold the final state with `wait(2)` before `stop_recording`, so the result stays on screen.
 - `stop_recording()` encodes the video: still stretches play 3× faster (`mpdecimate`, `max=2`, so a
   short toast stays visible), H.264, up to 1280 px wide. Without ffmpeg it keeps the raw `.mov`.
 - Always stop a recording you started, also after an error or an abort.
