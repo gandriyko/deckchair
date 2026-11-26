@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
+# dependencies = ["mcp>=1.10,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
 # ///
 import asyncio
 import json
@@ -114,7 +114,13 @@ assert {"time", "pid", "app"} <= last.keys(), last
 print(f"wait: {waited:.1f} s; log: {len(aborted)} aborted calls and the wait in {server._log_path()}")
 
 tools = {tool.name: tool.inputSchema for tool in asyncio.run(server.mcp.list_tools())}
-assert set(tools["click"]["properties"]) == {"x", "y", "button", "clicks", "modifiers"}, tools["click"]
+assert set(tools["click"]["properties"]) == {"x", "y", "button", "clicks", "modifiers", "screenshot"}, tools["click"]
+quiet = asyncio.run(server.mcp.call_tool("move", {"x": width // 2, "y": height // 2, "screenshot": False}))
+loud = asyncio.run(server.mcp.call_tool("move", {"x": width // 2, "y": height // 2}))
+quiet_types = [content.type for content in (quiet[0] if isinstance(quiet, tuple) else quiet)]
+loud_types = [content.type for content in (loud[0] if isinstance(loud, tuple) else loud)]
+assert quiet_types == ["text"] and loud_types == ["image"], (quiet_types, loud_types)
+print("screenshot=False: an action returns 'ok' text instead of an image")
 assert tools["wait"]["required"] == ["seconds"], tools["wait"]
 print(f"schema: {len(tools)} tools, logged wrappers keep their parameters")
 

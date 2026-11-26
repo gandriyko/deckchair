@@ -39,6 +39,10 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 - **Vision.** `VNImageRequestHandler.initWithCGImage_options_` needs `None`, not `{}` ("key does not
   exist"). No Hebrew model (`supportedRecognitionLanguagesAndReturnError_` lists the languages). The very
   first OCR call on a Mac took 34 s; later calls take 90–230 ms.
+- **Tool output.** Tools are `@mcp.tool(structured_output=False)` (needs `mcp>=1.10`): a return type of
+  `Image | str` otherwise fails pydantic output-schema generation at import, and plain text beats the
+  `{"result": ...}` wrapper. Acting tools take `screenshot: bool = True`; inside them the name shadows
+  the `screenshot` tool, so they call `_after_action(screenshot)` / `_finish(screenshot)`, never `screenshot()`.
 - **pyautogui-style modifiers fail.** A modifier key-down without flags on the event never reaches
   `cmd+tab` / `cmd+space`.
 - **Capture API.** ScreenCaptureKit (`SCScreenshotManager`, ~37 ms with pixels read; ~200 ms the first

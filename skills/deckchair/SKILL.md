@@ -11,7 +11,11 @@ sandbox and no undo. Act like a careful human operator.
 ## Rules for agents
 
 - **Look first.** Start with `screenshot`. Every action tool returns a screenshot taken 0.4 s after
-  the action; read it before the next step. For something slow (a report loading, RDP lag) call
+  the action; read it before the next step.
+- **Save tokens on predictable steps.** A screenshot costs ~2k tokens. Pass `screenshot=False` to an
+  action whose result you don't need to see, and look only after the last step of a chain: click a
+  field (`screenshot=False`) → `type_text(..., screenshot=False)` → `key("enter")` with a screenshot. Never
+  skip the screenshot after a step that can fail visibly (a dialog, a save, a navigation). For something slow (a report loading, RDP lag) call
   `wait(seconds)`: it returns a screenshot after the wait.
 - **Everything you do is logged.** Acting calls go to `~/.deckchair/actions-YYYY-MM-DD.jsonl` (one
   file per day) with their arguments. When the user asks what you did, read that day's file instead of

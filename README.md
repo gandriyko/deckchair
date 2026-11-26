@@ -48,6 +48,8 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 | `save_screenshot` | Save a full-resolution `.png` / `.jpg` to a file |
 | `start_recording` / `stop_recording` | Record the screen or a region to an `.mp4`, clicks shown; returns a contact sheet |
 
+Every acting tool returns a screenshot of the result (~2k tokens for the model). Pass `screenshot=False` to get `ok` instead, for steps in a chain whose result needn't be seen.
+
 ### Screen videos
 
 Recordings are made to be watched, not endured:

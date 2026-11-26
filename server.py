@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.2,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
+# dependencies = ["mcp>=1.10,<2", "pyobjc-framework-Quartz", "pyobjc-framework-Vision", "pyobjc-framework-ScreenCaptureKit"]
 # ///
 import atexit
 import fcntl
@@ -314,10 +314,15 @@ def _capture_jpeg() -> bytes:
     return _encode_image(scaled, "public.jpeg", {Quartz.kCGImageDestinationLossyCompressionQuality: 0.7})
 
 
-def _after_action() -> Image:
+def _after_action(show: bool = True) -> Image | str:
     # ponytail: fixed wait for the UI to redraw; raise it if RDP screenshots lag behind actions
     time.sleep(VISIBLE_PAUSE_SECONDS if recording else SETTLE_SECONDS)
-    return screenshot()
+    return _finish(show)
+
+
+def _finish(show: bool) -> Image | str:
+    # a screenshot costs the model ~2k tokens; screenshot=False skips it for steps whose result needn't be seen
+    return screenshot() if show else "ok"
 
 
 def _post_mouse(event_type: int, x: float, y: float, button: int, click_state: int = 1, flags: int = 0) -> None:
@@ -382,7 +387,7 @@ def _char_key(char: str) -> tuple[int, bool] | None:
     return None
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def screenshot() -> Image:
     """Screenshot of the selected display (the main one unless `use_display` chose another). Image pixel
     coordinates equal click coordinates.
@@ -391,20 +396,21 @@ def screenshot() -> Image:
     return Image(data=_capture_jpeg(), format="jpeg")
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def activate_app(name: str) -> Image:
+def activate_app(name: str, screenshot: bool = True) -> Image | str:
     """Bring an app to the front, launching it if needed: by name ('Windows App', 'Sublime Text') or bundle id
-    ('com.microsoft.rdc.macos'). Use it instead of clicking the Dock, e.g. after the terminal took focus."""
+    ('com.microsoft.rdc.macos'). Use it instead of clicking the Dock, e.g. after the terminal took focus.
+    screenshot=False returns 'ok' instead of a screenshot (~2k tokens less)."""
     _check_abort()
     flag = "-b" if "." in name and " " not in name else "-a"
     result = subprocess.run(["open", flag, name], capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise RuntimeError(f"Cannot open {name!r}: {result.stderr.strip()}")
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def zoom(x: int, y: int, width: int, height: int) -> Image:
     """Look closely at part of the screen: the region [x, y, width, height] (screenshot coordinates) at the
     display's native resolution, sharp enough to read small text and digits. Only for reading: its pixels are
@@ -431,7 +437,7 @@ def _ocr_region(region: list[int], screen_width: int, screen_height: int) -> lis
     return [x, y, width, height]
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def find_text(text: str | None = None, region: list[int] | None = None) -> str:
     """Read the text on screen with macOS OCR (Vision): every text line with its click point and box, in screenshot
     coordinates, top to bottom. With `text`, only lines that contain it (case-insensitive), and the point is the
@@ -535,10 +541,14 @@ def _ocr_tile(image, tile: list[int], needle: str | None) -> list[tuple[list[int
     return lines
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def click(x: int, y: int, button: str = "left", clicks: int = 1, modifiers: str = "") -> Image:
+def click(
+    x: int, y: int, button: str = "left", clicks: int = 1, modifiers: str = "", screenshot: bool = True
+) -> Image | str:
     """Click at (x, y). button: left | right | middle. clicks=2 for double click.
+    screenshot=False returns 'ok' instead of a screenshot (~2k tokens less): for steps whose result you don't need
+    to see, e.g. focusing a field before typing.
     modifiers: keys held during the click, '+'-joined: 'shift' (extend a selection), 'cmd' (add to a selection on
     macOS), 'ctrl' (the same in Windows / RDP), 'alt', 'cmd+shift'."""
     _check_abort()
@@ -556,22 +566,22 @@ def click(x: int, y: int, button: str = "left", clicks: int = 1, modifiers: str 
     for modifier_keycode, flag in reversed(held):
         flags &= ~flag
         _post_key(modifier_keycode, False, flags)
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def move(x: int, y: int) -> Image:
-    """Move the mouse to (x, y) without clicking (hover)."""
+def move(x: int, y: int, screenshot: bool = True) -> Image | str:
+    """Move the mouse to (x, y) without clicking (hover). screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
     _move_to(x, y)
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> Image:
-    """Drag with the left button from one point to another."""
+def drag(from_x: int, from_y: int, to_x: int, to_y: int, screenshot: bool = True) -> Image | str:
+    """Drag with the left button from one point to another. screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
     _move_to(from_x, from_y)
     _post_mouse(Quartz.kCGEventLeftMouseDown, from_x, from_y, Quartz.kCGMouseButtonLeft)
@@ -582,13 +592,14 @@ def drag(from_x: int, from_y: int, to_x: int, to_y: int) -> Image:
         _post_mouse(Quartz.kCGEventLeftMouseDragged, x, y, Quartz.kCGMouseButtonLeft)
         time.sleep(0.02)
     _post_mouse(Quartz.kCGEventLeftMouseUp, to_x, to_y, Quartz.kCGMouseButtonLeft)
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def scroll(x: int, y: int, amount: int) -> Image:
-    """Scroll at (x, y) by `amount` wheel ticks. Positive scrolls up, negative scrolls down."""
+def scroll(x: int, y: int, amount: int, screenshot: bool = True) -> Image | str:
+    """Scroll at (x, y) by `amount` wheel ticks. Positive scrolls up, negative scrolls down.
+    screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
     _move_to(x, y)
     direction = 1 if amount > 0 else -1
@@ -596,20 +607,21 @@ def scroll(x: int, y: int, amount: int) -> Image:
         event = Quartz.CGEventCreateScrollWheelEvent(EVENT_SOURCE, Quartz.kCGScrollEventUnitLine, 1, direction)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
         time.sleep(0.02)
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def type_text(text: str) -> Image:
+def type_text(text: str, screenshot: bool = True) -> Image | str:
     """Type text into the focused field. Any text, Cyrillic included. Inside an RDP client non-ASCII text is
-    pasted through the clipboard (ctrl+v on the remote side); the user's clipboard is restored afterwards."""
+    pasted through the clipboard (ctrl+v on the remote side); the user's clipboard is restored afterwards.
+    screenshot=False returns 'ok' instead of a screenshot (~2k tokens less), e.g. before a key('enter')."""
     _check_abort()
     if _frontmost_app() in RDP_APPS and any(_char_key(char) is None for char in text):
         # one paste for the whole text: the client syncs the clipboard slowly, and a second paste soon after
         # the first one inserts the first text again
         _paste_in_rdp(text)
-        return _after_action()
+        return _after_action(screenshot)
     shift = [MODIFIERS["shift"]]
     for char in text:
         _check_abort()
@@ -620,7 +632,7 @@ def type_text(text: str) -> Image:
         else:
             keycode, needs_shift = key
             _press(keycode, shift if needs_shift else [], char)
-    return _after_action()
+    return _after_action(screenshot)
 
 
 def _frontmost_app() -> str | None:
@@ -671,10 +683,11 @@ def _running_app(bundle_id: str):
     return AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)[0]
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def key(keys: str) -> Image:
-    """Press a key or combo, e.g. 'enter', 'tab', 'esc', 'cmd+tab', 'cmd+space', 'shift+home', 'ctrl+alt+delete'."""
+def key(keys: str, screenshot: bool = True) -> Image | str:
+    """Press a key or combo, e.g. 'enter', 'tab', 'esc', 'cmd+tab', 'cmd+space', 'shift+home', 'ctrl+alt+delete'.
+    screenshot=False returns 'ok' instead of a screenshot (~2k tokens less)."""
     _check_abort()
     *modifier_names, name = keys.lower().split("+")
     modifiers = [MODIFIERS[modifier] for modifier in modifier_names]
@@ -682,18 +695,18 @@ def key(keys: str) -> Image:
     if keycode is None:
         raise ValueError(f"Unknown key: {name}")
     _press(keycode, modifiers)
-    return _after_action()
+    return _after_action(screenshot)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
-def wait(seconds: float) -> Image:
+def wait(seconds: float, screenshot: bool = True) -> Image | str:
     """Wait without acting (a report loading, RDP redrawing, holding the final state for a video), then return a
-    screenshot. Up to 30 s."""
+    screenshot. Up to 30 s. screenshot=False returns 'ok' instead, e.g. to hold the last frame of a video."""
     _check_abort()
     time.sleep(min(max(seconds, 0), 30))
     _check_abort()
-    return screenshot()
+    return _finish(screenshot)
 
 
 def _output_path(path: str, suffixes: tuple[str, ...]) -> Path:
@@ -704,7 +717,7 @@ def _output_path(path: str, suffixes: tuple[str, ...]) -> Path:
     return target
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
 def save_screenshot(path: str) -> str:
     """Save a full-resolution screenshot of the selected display to a file (.png or .jpg) and return its path.
@@ -724,7 +737,7 @@ def _screencapture_display() -> str:
     return str(_displays().index(selected_display[0]) + 1)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 def list_displays() -> str:
     """The connected displays: index, size in points, position, which is main and which is selected. All tool
     coordinates are relative to the selected display; switch with `use_display`."""
@@ -741,7 +754,7 @@ def list_displays() -> str:
     return "\n".join(lines)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
 def use_display(index: int) -> Image:
     """Select the display that screenshots, clicks, OCR, zoom, files and recordings work on, by its index in
@@ -806,7 +819,7 @@ def _contact_sheet(video: Path, seconds: float) -> tuple[Path, float]:
     return sheet, tile_seconds
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
 def start_recording(path: str, region: list[int] | None = None) -> str:
     """Start recording the screen to an .mp4 file, with mouse clicks shown. Stop it with `stop_recording`.
@@ -835,7 +848,7 @@ def start_recording(path: str, region: list[int] | None = None) -> str:
     return f"Recording to {target}"
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 @_logged
 def stop_recording() -> str:
     """Stop the recording and encode it: duplicate still frames cut (pauses play faster), H.264, at most
