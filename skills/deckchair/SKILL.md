@@ -44,6 +44,9 @@ sandbox and no undo. Act like a careful human operator.
 - **Lock error.** "Deckchair is already in use by another process" means another session drives the
   desktop. Tell the user the PID from the message; do not kill it yourself.
 - **Never type secrets.** No passwords, tokens or card numbers. The user signs in to RDP and apps.
+- **Hands off password managers.** If 1Password, Keychain Access or a password prompt comes to the front
+  (1Password opened by itself while an RDP session connected), don't click, type or read in it. Stop and
+  ask the user to close it.
 - **Confirm before irreversible actions.** Before Save / Add / Post / Send / Delete / Approve, or any
   button that changes data, tell the user exactly what you will do and wait for a yes. Reading,
   opening reports and navigating need no confirmation.

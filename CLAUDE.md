@@ -17,7 +17,9 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
   found by `_homebrew_tool`); everything else works without them. Tesseract models (`heb`, `eng`,
   tessdata_fast) download once to `~/.deckchair/tessdata`.
 - After every change run `uv run --script check.py`. It takes the lock: stop a session that uses
-  Deckchair first. Then the user reconnects the server in `/mcp`; a newly added server needs a new session.
+  Deckchair first. Then the user reconnects the server in `/mcp`. Reconnect runs the new code but keeps
+  the old tool schemas and descriptions: new or changed parameters appear only in a new session
+  (`/exit`, then `claude --continue`). A newly added server also needs a new session.
 - Every new tool or changed tool behaviour goes into `README.md` (Tools table) and
   `skills/deckchair/SKILL.md` in the same commit.
 - Every action tool calls `_check_abort()` first (fail-safe + lock) and returns `_after_action()`.
