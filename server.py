@@ -9,12 +9,15 @@ import inspect
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -48,8 +51,15 @@ OCR_MAX_ASPECT = 8
 OCR_TILE = 400
 OCR_TILE_OVERLAP = 40
 OCR_MIN_NATIVE_SCALE = 4
+# English first: on rendered "Total <hebrew> ILS <amount>" lines eng+heb read every digit, heb+eng 50%; both read
+# the Hebrew 100%. A number before Hebrew ("1100 - <hebrew>") stays weak: 42%.
+TESSERACT_LANGUAGES = "eng+heb"
+HEBREW = re.compile("[֐-׿]")
+TESSERACT_WORKERS = 8
+TESSDATA_URL ="https://github.com/tesseract-ocr/tessdata_fast/raw/main/{language}.traineddata"
 LOCK_PATH = Path(tempfile.gettempdir()) / "deckchair.lock"
 LOG_DIR = Path.home() / ".deckchair"
+TESSDATA_DIR = LOG_DIR / "tessdata"
 held_lock = []
 selected_display = [Quartz.CGMainDisplayID()]
 sck_displays = {}
@@ -438,21 +448,56 @@ def _ocr_region(region: list[int], screen_width: int, screen_height: int) -> lis
 
 
 @mcp.tool(structured_output=False)
-def find_text(text: str | None = None, region: list[int] | None = None) -> str:
-    """Read the text on screen with macOS OCR (Vision): every text line with its click point and box, in screenshot
-    coordinates, top to bottom. With `text`, only lines that contain it (case-insensitive), and the point is the
-    centre of the match itself: click it to press a button or menu item by its label. region: [x, y, width, height]
-    to read only part of the screen. Use it to read exact numbers instead of guessing them from a screenshot."""
+def find_text(text: str | None = None, region: list[int] | None = None, hebrew: bool = False) -> str:
+    """Read the text on screen with OCR: every text line with its click point and box, in screenshot coordinates,
+    top to bottom. With `text`, only lines that contain it (case-insensitive), and the point is the centre of the
+    match itself: click it to press a button or menu item by its label. region: [x, y, width, height] to read only
+    part of the screen. Use it to read exact numbers instead of guessing them from a screenshot.
+    By default only Apple Vision runs (fast): English, Ukrainian, Russian and digits. It skips Hebrew lines and
+    garbles digits next to Hebrew. If the screenshot shows Hebrew in the region, pass hebrew=True: Tesseract then
+    reads the Hebrew lines (slower: ~+0.3 s for the full screen, needs `brew install tesseract`). A number right
+    before Hebrew text ("1100 - <name>") is unreliable even then: read it with a region around it alone, or zoom."""
     _acquire_lock()
     image, scale = _capture_native()
     screen_width, screen_height = _screen_size()
     wanted = region or [0, 0, screen_width, screen_height]
     needle = text.lower() if text else None
     upscale = max(1.0, OCR_MIN_NATIVE_SCALE / scale)
-    results = []
+    tiles = []
     for tile in _ocr_tiles(wanted):
         tile = _ocr_region(tile, screen_width, screen_height)
-        results += _ocr_tile(_upscale(_crop(image, scale, tile), upscale), tile, needle)
+        tiles.append((tile, _upscale(_crop(image, scale, tile), upscale)))
+    vision_results, tesseract_results = [], []
+    # Tesseract is the slow pass (full screen: 9.9 s in sequence, 2.4 s in 8 parallel single-threaded processes);
+    # Vision runs in this thread meanwhile
+    with ThreadPoolExecutor(TESSERACT_WORKERS) as pool:
+        futures = []
+        if hebrew:
+            if not _homebrew_tool("tesseract"):
+                raise RuntimeError("Hebrew OCR needs Tesseract: ask the user to run `brew install tesseract`.")
+            _tessdata()
+            futures = [pool.submit(_tesseract_tile, tile_image, tile, needle) for tile, tile_image in tiles]
+        for tile, tile_image in tiles:
+            vision_results += _ocr_tile(tile_image, tile, needle)
+        for future in futures:
+            tesseract_results += future.result()
+    found = _merge_hebrew(_dedupe(vision_results, wanted), _dedupe(tesseract_results, wanted))
+    return _format_lines(found) or (f"No text matching {text!r} on screen." if text else "No text on screen.")
+
+
+def _merge_hebrew(vision: list, tesseract: list) -> list:
+    """Vision has no Hebrew model and garbles digits in Hebrew lines, Tesseract reads them: a Tesseract line with
+    Hebrew replaces the Vision lines it overlaps; every other line stays Vision's."""
+    hebrew = [result for result in tesseract if HEBREW.search(result[1])]
+
+    def overlaps(first: list[int], second: list[int]) -> bool:
+        return _inside(_centre(first), second) or _inside(_centre(second), first)
+
+    kept = [result for result in vision if not any(overlaps(result[0], line[0]) for line in hebrew)]
+    return sorted(kept + hebrew, key=lambda result: (result[0][1], result[0][0]))
+
+
+def _dedupe(results: list, wanted: list[int]) -> list:
     found = []
     # longest lines first: a line cut at a tile edge is dropped in favour of the whole line from the next tile
     for line_box, line, point_box in sorted(results, key=lambda result: -len(result[1])):
@@ -460,10 +505,69 @@ def find_text(text: str | None = None, region: list[int] | None = None) -> str:
         if not _inside(centre, wanted) or any(_inside(centre, kept[0]) for kept in found):
             continue
         found.append((line_box, line, point_box))
-    if not found:
-        return f"No text matching {text!r} on screen." if text else "No text on screen."
-    found.sort(key=lambda result: (result[0][1], result[0][0]))
+    return sorted(found, key=lambda result: (result[0][1], result[0][0]))
+
+
+def _format_lines(found: list) -> str:
     return "\n".join(f"{line!r} at {_centre(point_box)} box {point_box}" for line_box, line, point_box in found)
+
+
+def _union(boxes: list[list[int]]) -> list[int]:
+    left = min(box[0] for box in boxes)
+    top = min(box[1] for box in boxes)
+    right = max(box[0] + box[2] for box in boxes)
+    bottom = max(box[1] + box[3] for box in boxes)
+    return [left, top, right - left, bottom - top]
+
+
+def _tessdata() -> Path:
+    """Tesseract's fast heb + eng models in ~/.deckchair/tessdata, downloaded once (0.9 MB + 4 MB)."""
+    for language in ("heb", "eng"):
+        model = TESSDATA_DIR / f"{language}.traineddata"
+        if not model.exists():
+            TESSDATA_DIR.mkdir(parents=True, exist_ok=True)
+            partial = model.with_suffix(".part")
+            urllib.request.urlretrieve(TESSDATA_URL.format(language=language), partial)
+            partial.rename(model)
+    return TESSDATA_DIR
+
+
+def _tesseract_tile(image, tile: list[int], needle: str | None) -> list[tuple[list[int], str, list[int]]]:
+    """Like _ocr_tile, with Tesseract: Vision has no Hebrew model. On rendered text Tesseract read Hebrew 100%,
+    Vision 0%; with heb first Tesseract dropped leading digits in mixed lines ("1100 - עו"ש" -> "0 - עו"ש")."""
+    tesseract = _homebrew_tool("tesseract")
+    if not tesseract:
+        raise RuntimeError("Hebrew OCR needs Tesseract: brew install tesseract")
+    with tempfile.NamedTemporaryFile(suffix=".png") as file:
+        Path(file.name).write_bytes(_encode_image(image, "public.png"))
+        result = subprocess.run(
+            # the "tsv" config file lives in Homebrew's tessdata/configs, not in our model folder: set it inline
+            [tesseract, file.name, "stdout", "-l", TESSERACT_LANGUAGES, "--psm", "6", "-c", "tessedit_create_tsv=1"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "TESSDATA_PREFIX": str(_tessdata()), "OMP_THREAD_LIMIT": "1"},
+        )
+    image_pixels_per_pixel = Quartz.CGImageGetWidth(image) / tile[2]
+    lines = {}
+    for row in result.stdout.splitlines()[1:]:
+        fields = row.split("\t")
+        if len(fields) < 12 or fields[0] != "5" or not fields[11].strip():
+            continue
+        left, top, width, height = (int(value) / image_pixels_per_pixel for value in fields[6:10])
+        box = [round(tile[0] + left), round(tile[1] + top), round(width), round(height)]
+        lines.setdefault(tuple(fields[2:5]), []).append((fields[11], box))
+    found = []
+    for words in lines.values():
+        line = " ".join(word for word, box in words)
+        line_box = point_box = _union([box for word, box in words])
+        if needle:
+            if needle not in line.lower():
+                continue
+            hits = [box for word, box in words if word.lower() in needle or needle in word.lower()]
+            point_box = _union(hits) if hits else line_box
+        found.append((line_box, line, point_box))
+    return found
 
 
 def _centre(box: list[int]) -> tuple[int, int]:
@@ -770,14 +874,14 @@ def use_display(index: int) -> Image:
 recording = {}
 
 
-def _video_tool(name: str) -> str | None:
+def _homebrew_tool(name: str) -> str | None:
     found = shutil.which(name) or f"/opt/homebrew/bin/{name}"
     return found if Path(found).exists() else None
 
 
 def _video_seconds(path: Path) -> float:
     probe = subprocess.run(
-        [_video_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+        [_homebrew_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
         capture_output=True,
         text=True,
         check=True,
@@ -794,7 +898,7 @@ def _encode_video(raw: Path, target: Path) -> None:
     )
     subprocess.run(
         [
-            _video_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(raw), "-vf", video_filter,
+            _homebrew_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(raw), "-vf", video_filter,
             "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p", "-movflags", "+faststart",
             str(target),
         ],
@@ -810,7 +914,7 @@ def _contact_sheet(video: Path, seconds: float) -> tuple[Path, float]:
     sheet = Path(tempfile.gettempdir()) / f"{video.stem}-contact.jpg"
     subprocess.run(
         [
-            _video_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(video),
+            _homebrew_tool("ffmpeg"), "-y", "-loglevel", "error", "-i", str(video),
             "-vf", f"fps=1/{tile_seconds:.3f},scale=240:-2,tile={columns}x{rows}", "-frames:v", "1", str(sheet),
         ],
         check=True,
@@ -862,7 +966,7 @@ def stop_recording() -> str:
     process.wait(timeout=30)
     if not raw.exists():
         raise RuntimeError(f"Recording stopped but no file was written: {raw}")
-    if not (_video_tool("ffmpeg") and _video_tool("ffprobe")):
+    if not (_homebrew_tool("ffmpeg") and _homebrew_tool("ffprobe")):
         return f"ffmpeg not found (brew install ffmpeg); raw recording kept: {raw}"
     _encode_video(raw, target)
     raw.unlink()

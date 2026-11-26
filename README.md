@@ -35,7 +35,7 @@ A single-file MCP server that gives Claude Code (or any MCP client) eyes and han
 |---|---|
 | `screenshot` | Screenshot of the selected display; image pixels equal click coordinates |
 | `zoom` | A region at the display's native resolution, to read small text and digits |
-| `find_text` | OCR (macOS Vision): text lines with click points; find a label and click it, read exact numbers |
+| `find_text` | OCR (Apple Vision): text lines with click points; find a label and click it, read exact numbers. `hebrew=True` adds Tesseract for Hebrew lines |
 | `activate_app` | Bring an app to the front by name or bundle id, launching it if needed |
 | `click` | Left, right or middle click; `clicks=2` for a double click; `modifiers="shift"` / `"cmd"` / `"ctrl"` held during it |
 | `list_displays` / `use_display` | The connected displays; pick the one all other tools work on |
@@ -63,9 +63,12 @@ The encoding needs [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`); without
 
 ## Install
 
-Deckchair runs on **macOS** and needs [uv](https://docs.astral.sh/uv/). `uv` installs the dependencies on first run.
+Deckchair runs on **macOS** and needs [uv](https://docs.astral.sh/uv/). `uv` installs the Python dependencies on first run. Two Homebrew tools add optional features:
 
 ```sh
+brew install uv
+brew install tesseract   # Hebrew OCR: find_text(..., hebrew=True)
+brew install ffmpeg      # MP4 encoding of screen recordings
 git clone git@github.com:gandriyko/deckchair.git ~/Projects/deckchair
 claude mcp add -s user deckchair -- uv run --script ~/Projects/deckchair/server.py
 claude mcp get deckchair        # should say Connected
@@ -90,6 +93,23 @@ The server runs as a child of your terminal, so macOS asks about the terminal ap
 - **Screenshots go to the model.** Close what the agent should not see.
 - **Sign in yourself.** The agent never types passwords; log in to RDP and apps before handing over.
 
+## Hebrew OCR
+
+Apple Vision has no Hebrew model: it skips Hebrew lines and garbles digits next to Hebrew. By default `find_text` runs Vision only, as fast as possible. The agent sees Hebrew in the screenshot and passes `hebrew=True`; then [Tesseract](https://github.com/tesseract-ocr/tesseract) (`brew install tesseract`) reads the same tiles and `find_text` returns one list: a line with Hebrew comes from Tesseract and replaces the Vision lines it overlaps, every other line comes from Vision. Tesseract runs in 8 parallel processes while Vision works: a full screen takes ~2.5 s instead of ~1.7 s. Its fast English and Hebrew models (5 MB) download once to `~/.deckchair/tessdata`.
+
+Deckchair can't detect Hebrew without Tesseract: Vision returns nothing for a Hebrew-only line and reports full confidence for a garbled `Total <Hebrew> ILS <amount>`, so the agent decides from the screenshot.
+
+Measured on rendered text, 10 and 13 px, 1x and 2x:
+
+| Line | Vision: digits / Hebrew | Tesseract `eng+heb`: digits / Hebrew |
+|---|---|---|
+| English only, numbers only | 100% | 100% |
+| `Total <Hebrew> ILS <amount>` | 8% / 0% | 100% / 100% |
+| `<number> - <Hebrew> ILS <amount>` | 17% / 0% | 75% / 100% |
+| `<number> - <Hebrew>` | 8% / 0% | 42% / 100% |
+
+Vision also garbles digits in a line with Hebrew. A number right before Hebrew text stays unreliable: read it with a region around the number alone.
+
 ## Remote Desktop (Windows App)
 
 Deckchair sends real key codes, left/right modifier bits and HID-state events, so RDP clients see a physical keyboard.
@@ -97,7 +117,7 @@ Deckchair sends real key codes, left/right modifier bits and HID-state events, s
 | Works in RDP | Limits |
 |---|---|
 | Clicks, menus, drop-downs, scroll | |
-| OCR of English, Ukrainian, Russian and digits | OCR can't read Hebrew (Vision has no Hebrew model) |
+| OCR of English, Ukrainian, Russian, Hebrew and digits | Hebrew OCR needs `hebrew=True` and Tesseract |
 | Text with capitals and symbols | Non-ASCII text takes ~2 s per `type_text` call |
 | Cyrillic and other non-ASCII text, through the clipboard | The window flicks to Finder and back once per paste |
 | `shift`, `ctrl`, `alt`, `cmd` combos | |

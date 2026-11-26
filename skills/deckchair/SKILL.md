@@ -31,7 +31,12 @@ sandbox and no undo. Act like a careful human operator.
 - **Read, don't guess.** For values (amounts, dates, account numbers) call `find_text` with a `region`
   around them and quote its text. A region is faster (~0.3 s) than the full screen (~2 s). For small text you only need to look at, use `zoom`.
 - **Click by label.** `find_text("Trial Balance")` returns the click point of the match itself; prefer it
-  to estimating coordinates from a screenshot. OCR reads English, Ukrainian, Russian and digits, not Hebrew.
+  to estimating coordinates from a screenshot. OCR reads English, Ukrainian, Russian, Hebrew and digits.
+- **Hebrew.** By default `find_text` runs only Apple Vision: it skips Hebrew lines and garbles digits
+  next to Hebrew, without any warning. If the screenshot shows Hebrew in the region, pass `hebrew=True`
+  (Tesseract reads those lines; ~+0.3 s per full screen). If it says Tesseract is missing, ask the user to
+  `brew install tesseract`. A number right before Hebrew ("1100 - <name>") is unreliable even then: read
+  it with a region around the number alone, or `zoom`, before you report it.
 - **Zoom is for reading only.** Its pixels are not click points. To click something you saw in a zoom,
   take its point from `find_text` or the screenshot.
 - **Stop on abort.** An error with `ABORTED BY USER` means the user pushed the mouse into a corner.

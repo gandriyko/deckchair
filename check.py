@@ -11,6 +11,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import AppKit
+import Foundation
 import Quartz
 import server
 
@@ -33,6 +35,49 @@ restored = subprocess.run(["pbpaste"], capture_output=True, text=True).stdout
 server._restore_clipboard(original_clipboard)
 assert restored == "clipboard check ✓", restored
 print("clipboard: saved and restored")
+
+def render(text: str, font_px: float = 10, scale: int = 2):
+    attributes = {AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_(font_px)}
+    attributed = Foundation.NSAttributedString.alloc().initWithString_attributes_(text, attributes)
+    width, height = int(attributed.size().width) + 16, int(attributed.size().height) + 10
+    rep = AppKit.NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+        None, width * scale, height * scale, 8, 4, True, False, AppKit.NSDeviceRGBColorSpace, 0, 0
+    )
+    rep.setSize_((width, height))
+    AppKit.NSGraphicsContext.saveGraphicsState()
+    AppKit.NSGraphicsContext.setCurrentContext_(AppKit.NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep))
+    AppKit.NSColor.whiteColor().set()
+    AppKit.NSRectFill(((0, 0), (width, height)))
+    attributed.drawAtPoint_((8, 5))
+    AppKit.NSGraphicsContext.restoreGraphicsState()
+    return rep.CGImage(), [0, 0, width, height]
+
+
+if server._homebrew_tool("tesseract"):
+    hebrew_line = "עו\"ש בנק הפועלים ILS 2,151,051.55"
+    hebrew_image, hebrew_tile = render(hebrew_line)
+    upscaled = server._upscale(hebrew_image, 2)
+    tesseract_lines = [line for box, line, point in server._tesseract_tile(upscaled, hebrew_tile, None)]
+    vision_lines = [line for box, line, point in server._ocr_tile(upscaled, hebrew_tile, None)]
+    assert "בנק הפועלים" in " ".join(tesseract_lines), tesseract_lines
+    assert "2,151,051.55" in " ".join(tesseract_lines), tesseract_lines
+    assert "בנק" not in " ".join(vision_lines), vision_lines
+    found = server._tesseract_tile(upscaled, hebrew_tile, "הפועלים")
+    assert found and server._inside(server._centre(found[0][2]), hebrew_tile), found
+
+    page_image, page_tile = render("Trial Balance 383,682.71\n" + hebrew_line)
+    page_image = server._upscale(page_image, 2)
+    merged = server._merge_hebrew(
+        server._dedupe(server._ocr_tile(page_image, page_tile, None), page_tile),
+        server._dedupe(server._tesseract_tile(page_image, page_tile, None), page_tile),
+    )
+    merged_lines = [line for box, line, point in merged]
+    assert len(merged_lines) == 2, merged_lines
+    assert merged_lines[0] == "Trial Balance 383,682.71", merged_lines
+    assert "בנק הפועלים" in merged_lines[1] and "2,151,051.55" in merged_lines[1], merged_lines
+    print(f"hebrew: merged {merged_lines}; Vision alone gave {vision_lines} for the Hebrew line")
+else:
+    print("hebrew: skipped, brew install tesseract")
 
 for char in string.ascii_letters + string.digits + string.punctuation + " \n\t":
     assert server._char_key(char) is not None, f"no keycode for {char!r}"
@@ -91,7 +136,9 @@ for corner in [(left, top), (right, top), (left, bottom), (right, bottom)]:
 Quartz.CGWarpMouseCursorPosition(original)
 print("fail-safe: all four corners abort")
 
-server.move(width // 2, height // 2)
+# _move_to and an immediate read: move() waits ~0.5 s for its screenshot, and a hand on the trackpad moves the
+# cursor meanwhile
+server._move_to(width // 2, height // 2)
 local_x, local_y = server._mouse_position()
 global_x, global_y = server._mouse_global()
 scale = server._points_per_pixel()
@@ -151,12 +198,19 @@ ocr_ms = (time.perf_counter() - start) * 1000
 assert "at (" in menu, menu
 menu_y = int(menu.split("at (")[1].split(",")[1].split(")")[0])
 assert menu_y < 40, menu
+start = time.perf_counter()
 everything = server.find_text()
+full_screen_ms = (time.perf_counter() - start) * 1000
+if server._homebrew_tool("tesseract"):
+    start = time.perf_counter()
+    server.find_text(hebrew=True)
+    hebrew_ms = (time.perf_counter() - start) * 1000
+    print(f"find_text(hebrew=True) on the full screen: {hebrew_ms:.0f} ms")
 assert everything.count("\n") >= 5, everything
 server.activate_app(previous_app)
 assert server._frontmost_app() == previous_app, server._frontmost_app()
 print(f"activate_app: Finder and back; find_text: menu title found in {ocr_ms:.0f} ms, "
-      f"{everything.count(chr(10)) + 1} lines on the full screen")
+      f"{everything.count(chr(10)) + 1} lines on the full screen in {full_screen_ms:.0f} ms")
 
 with tempfile.TemporaryDirectory() as folder:
     shot = Path(server.save_screenshot(f"{folder}/shots/screen.png"))
@@ -177,7 +231,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert glide_seconds >= server.GLIDE_SECONDS + server.VISIBLE_PAUSE_SECONDS, glide_seconds
     assert not Path(folder, "video.raw.mov").exists(), "raw recording left behind"
     probe = subprocess.run(
-        [server._video_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
+        [server._homebrew_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(video)],
         capture_output=True, text=True, check=True,
     ).stdout.strip()

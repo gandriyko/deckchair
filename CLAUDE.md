@@ -13,7 +13,9 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 
 - One file, four dependencies: `mcp<2` (`mcp` 2.x renamed FastMCP), `pyobjc-framework-Quartz`,
   `pyobjc-framework-Vision` and `pyobjc-framework-ScreenCaptureKit`, declared inline (PEP 723) and run with `uv run --script`. No `pyproject.toml`, no pyautogui, no Pillow.
-  Video encoding calls the `ffmpeg` / `ffprobe` binaries when present; everything else works without them.
+  Video encoding calls the `ffmpeg` / `ffprobe` binaries, Hebrew OCR the `tesseract` binary (Homebrew,
+  found by `_homebrew_tool`); everything else works without them. Tesseract models (`heb`, `eng`,
+  tessdata_fast) download once to `~/.deckchair/tessdata`.
 - After every change run `uv run --script check.py`. It takes the lock: stop a session that uses
   Deckchair first. Then the user reconnects the server in `/mcp`; a newly added server needs a new session.
 - Every new tool or changed tool behaviour goes into `README.md` (Tools table) and
@@ -39,6 +41,14 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 - **Vision.** `VNImageRequestHandler.initWithCGImage_options_` needs `None`, not `{}` ("key does not
   exist"). No Hebrew model (`supportedRecognitionLanguagesAndReturnError_` lists the languages). The very
   first OCR call on a Mac took 34 s; later calls take 90–230 ms.
+- **Hebrew OCR.** Vision reads no Hebrew and garbles digits in Hebrew lines. Tesseract `eng+heb` read
+  Hebrew 100% on rendered lines; `heb+eng` dropped leading digits ("1100 - <Hebrew>" -> "0 - ..."), so
+  English goes first. `-c tessedit_create_tsv=1`, not the `tsv` config: that file lives in Homebrew's
+  `tessdata/configs`, not in `~/.deckchair/tessdata`. Tesseract runs only with `find_text(hebrew=True)`:
+  the agent decides from the screenshot, because Vision gives no signal (nothing for a Hebrew-only line,
+  confidence 1.0 for a garbled `Total <Hebrew> ILS <amount>`). `_merge_hebrew` keeps a Tesseract line only
+  if it has Hebrew, dropping the Vision lines it overlaps. Tesseract runs per tile in 8 parallel processes with `OMP_THREAD_LIMIT=1` (full screen: 9.9 s
+  in sequence, 2.4 s parallel; one whole-screen pass: 5.9 s and fewer lines).
 - **Tool output.** Tools are `@mcp.tool(structured_output=False)` (needs `mcp>=1.10`): a return type of
   `Image | str` otherwise fails pydantic output-schema generation at import, and plain text beats the
   `{"result": ...}` wrapper. Acting tools take `screenshot: bool = True`; inside them the name shadows
