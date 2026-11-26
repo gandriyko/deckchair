@@ -192,6 +192,43 @@ print(f"zoom: 300x200 region -> {zoom_size[0]}x{zoom_size[1]} px")
 previous_app = server._frontmost_app()
 server.activate_app("Finder")
 assert server._frontmost_app() == "com.apple.finder", server._frontmost_app()
+finder = next(window for window in server._on_screen_windows()
+              if window["kCGWindowOwnerName"] == "Finder" and window["kCGWindowLayer"] == 0)
+frame = finder["kCGWindowBounds"]
+scale = server._points_per_pixel()
+finder_region = [int((frame["X"] - left) / scale) + 20, int((frame["Y"] - top) / scale) + 20, 200, 100]
+def finder_pixels(capture) -> bytes:
+    image = capture()
+    crop = server._crop(image, Quartz.CGImageGetWidth(image) / width, finder_region)
+    return bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(crop)))
+seen = {"sck": finder_pixels(lambda: server._capture_native()[0]), "legacy": finder_pixels(server._capture_legacy)}
+real_blocked = server.BLOCKED_APPS
+server.BLOCKED_APPS = real_blocked | {"Finder"}
+assert finder_pixels(lambda: server._capture_native()[0]) != seen["sck"], "ScreenCaptureKit showed a blocked app"
+assert finder_pixels(server._capture_legacy) != seen["legacy"], "CGWindowListCreateImage showed a blocked app"
+for name, call in {
+    "activate_app": lambda: server.activate_app("Finder", screenshot=False),
+    "key": lambda: server.key("esc", screenshot=False),
+    "start_recording": lambda: server.start_recording(f"{tempfile.gettempdir()}/blocked.mp4"),
+}.items():
+    try:
+        call()
+        raise AssertionError(f"{name} acted on a blocked app")
+    except PermissionError:
+        pass
+server.BLOCKED_APPS = real_blocked
+print("blocked apps: hidden from both capture APIs; activate_app, key and start_recording refuse")
+server.ALLOWED_APPS = {"Finder"}
+server._check_app()  # by name; the menu bar has no app window and counts as the front app
+server._check_app((width // 2, 2))
+server.ALLOWED_APPS = {"com.example.nothing"}
+try:
+    server.key("esc", screenshot=False)
+    raise AssertionError("key acted in an app outside DECKCHAIR_APPS")
+except PermissionError as error:
+    assert "Finder (com.apple.finder)" in str(error), error
+server.ALLOWED_APPS = set()
+print("DECKCHAIR_APPS: the front app by name passes, an app outside the list is refused")
 start = time.perf_counter()
 menu = server.find_text("Finder", region=[0, 0, width, 40])
 ocr_ms = (time.perf_counter() - start) * 1000
@@ -218,31 +255,34 @@ with tempfile.TemporaryDirectory() as folder:
     print(f"save_screenshot: {shot.stat().st_size // 1024} KB")
 
     video = Path(folder, "video.mp4")
-    wall_start = time.monotonic()
-    server.start_recording(str(video), region=[200, 200, 800, 450])
-    time.sleep(4)
-    glide_start = time.monotonic()
-    server.move(600, 400)
-    glide_seconds = time.monotonic() - glide_start
-    server.move(300, 300)
-    time.sleep(1)
-    summary = server.stop_recording()
-    wall_seconds = time.monotonic() - wall_start
-    assert glide_seconds >= server.GLIDE_SECONDS + server.VISIBLE_PAUSE_SECONDS, glide_seconds
-    assert not Path(folder, "video.raw.mov").exists(), "raw recording left behind"
-    probe = subprocess.run(
-        [server._homebrew_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(video)],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    codec, width, height = probe.split(",")
-    video_seconds = server._video_seconds(video)
-    assert codec == "h264" and int(width) == 1280, probe
-    assert video_seconds < wall_seconds * 0.8, (video_seconds, wall_seconds)
-    sheet = Path(summary.split("Contact sheet: ")[1].split(" (")[0])
-    assert sheet.stat().st_size > 0
-    print(
-        f"video: {codec} {width}x{height}, {video_seconds:.1f} s from {wall_seconds:.1f} s recorded, "
-        f"move while recording {glide_seconds:.1f} s, contact sheet ok"
-    )
+    if server._blocked_pids():
+        print("video: SKIPPED, a password manager window is on screen (recordings refuse); close it to test video")
+    else:
+        wall_start = time.monotonic()
+        server.start_recording(str(video), region=[200, 200, 800, 450])
+        time.sleep(4)
+        glide_start = time.monotonic()
+        server.move(600, 400)
+        glide_seconds = time.monotonic() - glide_start
+        server.move(300, 300)
+        time.sleep(1)
+        summary = server.stop_recording()
+        wall_seconds = time.monotonic() - wall_start
+        assert glide_seconds >= server.GLIDE_SECONDS + server.VISIBLE_PAUSE_SECONDS, glide_seconds
+        assert not Path(folder, "video.raw.mov").exists(), "raw recording left behind"
+        probe = subprocess.run(
+            [server._homebrew_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(video)],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        codec, width, height = probe.split(",")
+        video_seconds = server._video_seconds(video)
+        assert codec == "h264" and int(width) == 1280, probe
+        assert video_seconds < wall_seconds * 0.8, (video_seconds, wall_seconds)
+        sheet = Path(summary.split("Contact sheet: ")[1].split(" (")[0])
+        assert sheet.stat().st_size > 0
+        print(
+            f"video: {codec} {width}x{height}, {video_seconds:.1f} s from {wall_seconds:.1f} s recorded, "
+            f"move while recording {glide_seconds:.1f} s, contact sheet ok"
+        )
 print("OK")

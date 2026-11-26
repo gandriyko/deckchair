@@ -63,12 +63,17 @@ The encoding needs [ffmpeg](https://ffmpeg.org) (`brew install ffmpeg`); without
 
 ## Install
 
-Deckchair runs on **macOS** and needs [uv](https://docs.astral.sh/uv/). `uv` installs the Python dependencies on first run. Two Homebrew tools add optional features:
+Deckchair runs on **macOS** and needs [uv](https://docs.astral.sh/uv/). `uv` installs the Python dependencies on first run.
+
+Two Homebrew tools are optional. Install them for these features; everything else works without them:
+
+- **Tesseract**: Hebrew OCR, `find_text(..., hebrew=True)`. Without it that call fails and asks you to install it.
+- **ffmpeg**: MP4 encoding of screen recordings. Without it you get the raw `.mov`.
 
 ```sh
 brew install uv
-brew install tesseract   # Hebrew OCR: find_text(..., hebrew=True)
-brew install ffmpeg      # MP4 encoding of screen recordings
+brew install tesseract   # optional: Hebrew OCR
+brew install ffmpeg      # optional: MP4 screen recordings
 git clone git@github.com:gandriyko/deckchair.git ~/Projects/deckchair
 claude mcp add -s user deckchair -- uv run --script ~/Projects/deckchair/server.py
 claude mcp get deckchair        # should say Connected
@@ -89,7 +94,13 @@ The server runs as a child of your terminal, so macOS asks about the terminal ap
 - **Fail-safe.** Before every action, and before every typed character, Deckchair checks the mouse. In a corner of any display it refuses with `ABORTED BY USER`, and the agent stops and asks. Hold the mouse there until the agent stops.
 - **One process.** The first tool call takes a lock (`$TMPDIR/deckchair.lock`, holding the PID). Another session gets an error naming that PID. The lock goes away when the session exits.
 - **Action log.** Every acting call (click, type, key, scroll, drag, app switch, wait, files, recording) is appended to `~/.deckchair/actions-YYYY-MM-DD.jsonl`, one JSON line per call and one file per day: time, process, tool, arguments, front app, result or error. Appending costs ~50 µs whatever the file size. Typed text is in the log. Looking (`screenshot`, `zoom`, `find_text`) is not logged.
-- **No per-app approval.** Unlike built-in computer use, Deckchair does not ask before touching an app. Approve its tools per call, not "always", until you trust the workflow.
+- **App allowlist.** Set `DECKCHAIR_APPS` to the apps the agent may act in: bundle ids or names, comma-separated. `click`, `move`, `drag` and `scroll` check the app whose window lies under each point; `key` and `type_text` (before every character) check the front app. Anything else is refused with `NOT ALLOWED`. Outside app windows (menu bar, Dock, popup menus) the front app counts. Unset, every app is allowed. `activate_app`, screenshots and OCR are not limited.
+
+  ```sh
+  claude mcp add -s user -e DECKCHAIR_APPS="Windows App,Sublime Text" deckchair -- uv run --script ~/Projects/deckchair/server.py
+  ```
+- **Password managers are off limits.** 1Password, Apple Passwords, Keychain Access, Bitwarden, LastPass, Dashlane, Keeper, NordPass, Proton Pass, Enpass, KeePassXC, Strongbox, MacPass, RoboForm and Secrets. Screenshots, `zoom`, `find_text` and `save_screenshot` hide their windows (ScreenCaptureKit excludes the app; the fallback capture leaves its windows out). `activate_app` refuses to open them, and clicks, keys and typing refuse to act in them. The `screencapture` CLI can't hide a window, so `start_recording` refuses while such a window is on screen, and a recording is deleted if one appears during it. The list is `PASSWORD_MANAGERS` in `server.py`, matched by bundle id or app name.
+- **No per-app approval.** Deckchair does not ask before touching an app. Without an allowlist, approve its tools per call, not "always", until you trust the workflow.
 - **Screenshots go to the model.** Close what the agent should not see.
 - **Sign in yourself.** The agent never types passwords; log in to RDP and apps before handing over.
 

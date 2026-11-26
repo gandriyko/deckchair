@@ -45,6 +45,29 @@ CORNER_TOLERANCE = 1
 # ponytail: Windows App / Microsoft Remote Desktop only; add the bundle IDs of other RDP / VNC clients here
 RDP_APPS = {"com.microsoft.rdc.macos"}
 CLIPBOARD_SYNC_SECONDS = 1.0
+# Apps the agent may act in: bundle ids or names, comma-separated. Unset or empty: every app.
+ALLOWED_APPS = {app.strip() for app in os.environ.get("DECKCHAIR_APPS", "").split(",") if app.strip()}
+# Password managers: the agent never acts in, activates or sees them; captures hide their windows.
+# Matched by bundle id or by name, so a wrong or changed bundle id is still caught by the name.
+PASSWORD_MANAGERS = {
+    "com.1password.1password": "1Password",
+    "com.agilebits.onepassword7": "1Password 7",
+    "com.apple.Passwords": "Passwords",
+    "com.apple.keychainaccess": "Keychain Access",
+    "com.bitwarden.desktop": "Bitwarden",
+    "com.lastpass.LastPass": "LastPass",
+    "com.dashlane.dashlanephonefinal": "Dashlane",
+    "com.keepersecurity.passwordmanager": "Keeper Password Manager",
+    "com.nordsec.nordpass": "NordPass",
+    "me.proton.pass.electron": "Proton Pass",
+    "in.sinew.Enpass-Desktop": "Enpass",
+    "org.keepassxc.keepassxc": "KeePassXC",
+    "com.markmcguill.strongbox.mac": "Strongbox",
+    "com.hicknhacksoftware.MacPass": "MacPass",
+    "com.siber.roboform": "RoboForm",
+    "com.outercorner.Secrets": "Secrets",
+}
+BLOCKED_APPS = set(PASSWORD_MANAGERS) | set(PASSWORD_MANAGERS.values())
 # Vision OCR on this Mac has no Hebrew: Hebrew labels are not read, digits next to them are
 OCR_LANGUAGES = ["en-US", "uk-UA", "ru-RU"]
 OCR_MAX_ASPECT = 8
@@ -63,6 +86,7 @@ TESSDATA_DIR = LOG_DIR / "tessdata"
 held_lock = []
 selected_display = [Quartz.CGMainDisplayID()]
 sck_displays = {}
+sck_blocked = {}
 last_capture_api = [""]
 SCK_TIMEOUT_SECONDS = 10
 
@@ -177,6 +201,10 @@ def _acquire_lock() -> None:
 
 def _check_abort() -> None:
     _acquire_lock()
+    if recording and _blocked_pids():
+        # ponytail: checked only between actions; a blocked app that opens mid-wait is in the video until then
+        _discard_recording()
+        raise PermissionError("NOT ALLOWED: a password manager came on screen while recording; the recording is deleted.")
     x, y = _mouse_global()
     for display in _displays():
         bounds = Quartz.CGDisplayBounds(display)
@@ -190,6 +218,64 @@ def _check_abort() -> None:
         raise AbortedByUser(
             "ABORTED BY USER: the mouse is in a screen corner. Stop all desktop actions and ask the user how to proceed."
         )
+
+
+def _app_at(x: float, y: float):
+    """The app whose normal window is topmost at screenshot point (x, y); None outside app windows."""
+    bounds = _display_bounds()
+    scale = _points_per_pixel()
+    point_x, point_y = bounds.origin.x + x * scale, bounds.origin.y + y * scale
+    options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    # front to back; only layer 0: the menu bar and the Dock lie above every app in full-screen windows
+    for window in Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID):
+        frame = window["kCGWindowBounds"]
+        if window["kCGWindowLayer"] == 0 and frame["X"] <= point_x < frame["X"] + frame["Width"] \
+                and frame["Y"] <= point_y < frame["Y"] + frame["Height"]:
+            return AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(window["kCGWindowOwnerPID"])
+    return None
+
+
+def _is_blocked(app) -> bool:
+    return bool(app and {app.bundleIdentifier(), app.localizedName()} & BLOCKED_APPS)
+
+
+def _on_screen_windows() -> list[dict]:
+    """On-screen windows, front to back. Occluded windows count: a capture must not depend on window order."""
+    return Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
+
+
+def _blocked_pids() -> set[int]:
+    """PIDs of BLOCKED_APPS with a window on screen."""
+    pids = {window["kCGWindowOwnerPID"] for window in _on_screen_windows()}
+    return {pid for pid in pids if _is_blocked(AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid))}
+
+
+def _refuse_blocked_on_screen(what: str) -> None:
+    # the screencapture CLI can't hide a window: refuse instead
+    if _blocked_pids():
+        raise PermissionError(
+            f"NOT ALLOWED: a password manager is on screen; {what} would show it. Ask the user to close it."
+        )
+
+
+def _check_app(*points: tuple[float, float]) -> None:
+    """Refuse to act in BLOCKED_APPS or outside DECKCHAIR_APPS: keys go to the front app, the mouse to the window
+    under each point.
+    ponytail: a point outside app windows (menu bar, Dock, popup menu) counts as the front app, so the Dock is
+    clickable while an allowed app is in front; match the Dock's layer-20 frame if that matters."""
+    for app in [_app_at(x, y) for x, y in points] or [None]:
+        app = app or _running_app(_frontmost_app())
+        if _is_blocked(app):
+            raise PermissionError(
+                f"NOT ALLOWED: {app.localizedName()} is blocked: Deckchair never acts in it. Stop and ask the user "
+                f"to close it."
+            )
+        if ALLOWED_APPS and not {app.bundleIdentifier(), app.localizedName()} & ALLOWED_APPS:
+            raise PermissionError(
+                f"NOT ALLOWED: {app.localizedName()} ({app.bundleIdentifier()}) is not in DECKCHAIR_APPS "
+                f"({', '.join(sorted(ALLOWED_APPS))}). Bring an allowed app to the front with activate_app, or ask "
+                f"the user to allow this one."
+            )
 
 
 def _log_path(day: datetime | None = None) -> Path:
@@ -258,21 +344,29 @@ def _sck_wait(call) -> tuple:
     return answer["values"]
 
 
-def _sck_display(display_id: int):
-    # SCShareableContent costs ~50 ms: cache the SCDisplay objects, refetch when a display appears
-    if display_id not in sck_displays:
+def _sck_content(display_id: int) -> tuple:
+    """The SCDisplay and the SCRunningApplications to hide. SCShareableContent costs ~50 ms: cached, refetched
+    when a display appears or the blocked apps on screen change."""
+    pids = _blocked_pids()
+    if display_id not in sck_displays or sck_blocked.get("pids") != pids:
         content, error = _sck_wait(ScreenCaptureKit.SCShareableContent.getShareableContentWithCompletionHandler_)
         if content is None:
             raise RuntimeError(f"ScreenCaptureKit: no shareable content ({error})")
         sck_displays.clear()
         sck_displays.update({display.displayID(): display for display in content.displays()})
-    return sck_displays[display_id]
+        hidden = [app for app in content.applications() if app.processID() in pids]
+        if len(hidden) < len(pids):
+            sck_displays.clear()
+            raise RuntimeError("ScreenCaptureKit does not list a blocked app yet")
+        sck_blocked.update(pids=pids, apps=hidden)
+    return sck_displays[display_id], sck_blocked["apps"]
 
 
 def _capture_sck(display_id: int):
     mode = Quartz.CGDisplayCopyDisplayMode(display_id)
-    content_filter = ScreenCaptureKit.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
-        _sck_display(display_id), []
+    display, hidden = _sck_content(display_id)
+    content_filter = ScreenCaptureKit.SCContentFilter.alloc().initWithDisplay_excludingApplications_exceptingWindows_(
+        display, hidden, []
     )
     config = ScreenCaptureKit.SCStreamConfiguration.alloc().init()
     config.setWidth_(Quartz.CGDisplayModeGetPixelWidth(mode))
@@ -290,10 +384,11 @@ def _capture_sck(display_id: int):
 
 
 def _capture_legacy():
-    capture = getattr(Quartz, "CGWindowListCreateImage", None)
-    image = capture and capture(
-        _display_bounds(), Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID, Quartz.kCGWindowImageDefault
-    )
+    capture = getattr(Quartz, "CGWindowListCreateImageFromArray", None)
+    # every on-screen window except the blocked apps', front to back
+    blocked = _blocked_pids()
+    windows = [window["kCGWindowNumber"] for window in _on_screen_windows() if window["kCGWindowOwnerPID"] not in blocked]
+    image = capture and capture(_display_bounds(), windows, Quartz.kCGWindowImageDefault)
     if image is None:
         raise RuntimeError("Screen capture failed: grant Screen Recording to the terminal app and restart it.")
     return image
@@ -413,10 +508,17 @@ def activate_app(name: str, screenshot: bool = True) -> Image | str:
     ('com.microsoft.rdc.macos'). Use it instead of clicking the Dock, e.g. after the terminal took focus.
     screenshot=False returns 'ok' instead of a screenshot (~2k tokens less)."""
     _check_abort()
+    if name.lower() in {app.lower() for app in BLOCKED_APPS}:
+        raise PermissionError(f"NOT ALLOWED: {name} is blocked: Deckchair never opens it.")
     flag = "-b" if "." in name and " " not in name else "-a"
     result = subprocess.run(["open", flag, name], capture_output=True, text=True, timeout=30)
     if result.returncode:
         raise RuntimeError(f"Cannot open {name!r}: {result.stderr.strip()}")
+    front = _running_app(_frontmost_app())
+    if _is_blocked(front):
+        # a name that resolves to a blocked app (an alias, a path): put it away again
+        front.hide()
+        raise PermissionError(f"NOT ALLOWED: {name} opened {front.localizedName()}, which is blocked; hidden again.")
     return _after_action(screenshot)
 
 
@@ -656,6 +758,7 @@ def click(
     modifiers: keys held during the click, '+'-joined: 'shift' (extend a selection), 'cmd' (add to a selection on
     macOS), 'ctrl' (the same in Windows / RDP), 'alt', 'cmd+shift'."""
     _check_abort()
+    _check_app((x, y))
     down, up, button_code = MOUSE_BUTTONS[button]
     held = [MODIFIERS[name] for name in modifiers.lower().split("+") if name]
     _move_to(x, y)
@@ -678,6 +781,7 @@ def click(
 def move(x: int, y: int, screenshot: bool = True) -> Image | str:
     """Move the mouse to (x, y) without clicking (hover). screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
+    _check_app((x, y))
     _move_to(x, y)
     return _after_action(screenshot)
 
@@ -687,6 +791,7 @@ def move(x: int, y: int, screenshot: bool = True) -> Image | str:
 def drag(from_x: int, from_y: int, to_x: int, to_y: int, screenshot: bool = True) -> Image | str:
     """Drag with the left button from one point to another. screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
+    _check_app((from_x, from_y), (to_x, to_y))
     _move_to(from_x, from_y)
     _post_mouse(Quartz.kCGEventLeftMouseDown, from_x, from_y, Quartz.kCGMouseButtonLeft)
     steps = 20
@@ -705,6 +810,7 @@ def scroll(x: int, y: int, amount: int, screenshot: bool = True) -> Image | str:
     """Scroll at (x, y) by `amount` wheel ticks. Positive scrolls up, negative scrolls down.
     screenshot=False returns 'ok' instead of a screenshot."""
     _check_abort()
+    _check_app((x, y))
     _move_to(x, y)
     direction = 1 if amount > 0 else -1
     for tick in range(abs(amount)):
@@ -721,6 +827,7 @@ def type_text(text: str, screenshot: bool = True) -> Image | str:
     pasted through the clipboard (ctrl+v on the remote side); the user's clipboard is restored afterwards.
     screenshot=False returns 'ok' instead of a screenshot (~2k tokens less), e.g. before a key('enter')."""
     _check_abort()
+    _check_app()
     if _frontmost_app() in RDP_APPS and any(_char_key(char) is None for char in text):
         # one paste for the whole text: the client syncs the clipboard slowly, and a second paste soon after
         # the first one inserts the first text again
@@ -729,6 +836,7 @@ def type_text(text: str, screenshot: bool = True) -> Image | str:
     shift = [MODIFIERS["shift"]]
     for char in text:
         _check_abort()
+        _check_app()  # the terminal can take focus mid-text
         key = _char_key(char)
         if key is None:
             # keycode 0 + Unicode string: macOS apps read the string
@@ -793,6 +901,7 @@ def key(keys: str, screenshot: bool = True) -> Image | str:
     """Press a key or combo, e.g. 'enter', 'tab', 'esc', 'cmd+tab', 'cmd+space', 'shift+home', 'ctrl+alt+delete'.
     screenshot=False returns 'ok' instead of a screenshot (~2k tokens less)."""
     _check_abort()
+    _check_app()
     *modifier_names, name = keys.lower().split("+")
     modifiers = [MODIFIERS[modifier] for modifier in modifier_names]
     keycode = NAMED_KEYS.get(name, KEYCODES.get(name))
@@ -828,9 +937,9 @@ def save_screenshot(path: str) -> str:
     Use it to keep evidence for the user; use `screenshot` to look at the screen yourself."""
     _acquire_lock()
     target = _output_path(path, (".png", ".jpg", ".jpeg"))
-    image_format = "png" if target.suffix.lower() == ".png" else "jpg"
-    command = ["screencapture", "-x", "-D", _screencapture_display(), "-t", image_format, str(target)]
-    subprocess.run(command, check=True, timeout=15)
+    # the same capture as `screenshot`, at native resolution: it hides BLOCKED_APPS, the screencapture CLI can't
+    uti = "public.png" if target.suffix.lower() == ".png" else "public.jpeg"
+    target.write_bytes(_encode_image(_capture_native()[0], uti))
     return str(target)
 
 
@@ -933,6 +1042,7 @@ def start_recording(path: str, region: list[int] | None = None) -> str:
     if recording:
         raise RuntimeError(f"Already recording to {recording['path']}. Call stop_recording first.")
     target = _output_path(path, (".mp4",))
+    _refuse_blocked_on_screen("a recording")
     raw = target.with_name(f"{target.stem}.raw.mov")
     command = ["screencapture", "-v", "-x", "-k"]
     if region:
@@ -976,6 +1086,14 @@ def stop_recording() -> str:
         f"{target} ({seconds:.1f} s, {target.stat().st_size // 1024} KB). "
         f"Contact sheet: {sheet} (1 tile = {tile_seconds:.1f} s of video, left to right, top to bottom)"
     )
+
+
+def _discard_recording() -> None:
+    process, raw = recording["process"], recording["raw"]
+    recording.clear()
+    process.kill()
+    process.wait(timeout=30)
+    raw.unlink(missing_ok=True)
 
 
 @atexit.register

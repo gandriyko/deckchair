@@ -64,7 +64,10 @@ unless asked. The remote is `git@github-gandriyko:gandriyko/deckchair.git` (SSH 
 - **Screenshot stall.** While another live process of the same Python binary has captured the screen,
   SCK doesn't answer at all and `CGWindowListCreateImage` waits 30 s (`CGDisplayCreateImage` fails after
   5 s). The lock prevents it between Deckchair processes; stop the session's server before running
-  `check.py` or a test script. `screencapture` (the CLI) is not affected; files use it.
+  `check.py` or a test script. `screencapture` (the CLI) is not affected; only video uses it.
+- **Password managers (`PASSWORD_MANAGERS` -> `BLOCKED_APPS`).** Captures hide them: SCK `excludingApplications` (the cached content refetches
+  when the blocked PIDs on screen change), the fallback `CGWindowListCreateImageFromArray` without its windows.
+  `save_screenshot` uses the same capture for that reason. `screencapture` can't hide a window: recording refuses.
 - **Coordinates are screenshot pixels.** A screenshot is the display in points, shrunk to
   `SCREENSHOT_MAX_EDGE` (1568) on the long edge: Claude Code shrinks wider images before the model sees
   them (a 2304 px screenshot showed at 2000, every click missed by 15%). `_points_per_pixel()` scales

@@ -43,10 +43,15 @@ sandbox and no undo. Act like a careful human operator.
   Stop all desktop actions at once, take no screenshot, and ask the user how to proceed.
 - **Lock error.** "Deckchair is already in use by another process" means another session drives the
   desktop. Tell the user the PID from the message; do not kill it yourself.
+- **Allowed apps only.** An error with `NOT ALLOWED` means the app under the point (mouse) or in front
+  (keys) is outside the user's `DECKCHAIR_APPS`. Bring an allowed app to the front with `activate_app`
+  and retry; if the task needs that app, ask the user. Never work around the list.
 - **Never type secrets.** No passwords, tokens or card numbers. The user signs in to RDP and apps.
-- **Hands off password managers.** If 1Password, Keychain Access or a password prompt comes to the front
-  (1Password opened by itself while an RDP session connected), don't click, type or read in it. Stop and
-  ask the user to close it.
+- **Hands off password managers.** Deckchair hides password managers (1Password, Passwords, Keychain
+  Access, Bitwarden and others) from every screenshot and refuses to open or act in them (`NOT ALLOWED
+  ... blocked`): never try another way in. If a password prompt comes to the front, don't click, type or
+  read in it. Stop and ask the user to close it. A recording refuses to start, or is deleted, while a
+  password manager window is on screen: ask the user to close it.
 - **Confirm before irreversible actions.** Before Save / Add / Post / Send / Delete / Approve, or any
   button that changes data, tell the user exactly what you will do and wait for a yes. Reading,
   opening reports and navigating need no confirmation.
